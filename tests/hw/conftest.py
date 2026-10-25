@@ -8,7 +8,7 @@ import os
 from collections.abc import Iterator
 
 import pytest
-from hw_helpers import SignalSpec, signal_from_env
+from hw_helpers import ENV_INPUT_OPEN, ENV_SIGNAL, SignalSpec, flag, signal_from_env
 
 from edu09 import storage
 from edu09.device.scope import Scope
@@ -18,6 +18,15 @@ from edu09.model import Settings
 # Computed at import (collection), before the per-test platformdirs isolation: the real saved
 # calibration is used read-only by the hardware tests.
 REAL_CALIBRATION = storage.default_calibration_path()
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """A signal on CH1 and an open CH1 are contradictory: refuse to run both groups at once."""
+    if signal_from_env() is not None and flag(ENV_INPUT_OPEN):
+        raise pytest.UsageError(
+            f"{ENV_SIGNAL} (signal connected) and {ENV_INPUT_OPEN}=1 (input disconnected) are "
+            "mutually exclusive: run the two groups separately"
+        )
 
 
 def open_scope_or_skip(**kw: object) -> Scope:
