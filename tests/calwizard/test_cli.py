@@ -174,7 +174,7 @@ def test_simulate_interactive_quit_saves_nothing(tmp_path: Path) -> None:
 def test_simulate_interactive_full_flow(tmp_path: Path) -> None:
     path = tmp_path / "cal.json"
     # start, zero, then Enter = simulated reading for every step, save, verify reading
-    answers = ["y", "y", "", "", "y", ""]
+    answers = ["y", "y", "", "", "y", "", ""]
     code, text = _run(
         [
             "--simulate",
@@ -231,3 +231,54 @@ def test_help_epilog_has_single_percent(capsys: pytest.CaptureFixture[str]) -> N
         cli.main(["--help"])
     text = capsys.readouterr().out
     assert "VOLTS[@TOL%]" in text and "%%" not in text
+
+
+_SIM_ARGS = ["--simulate", "--sim-clock", "virtual", "--fixed", "1.5,rev,label=AA"]
+
+
+def test_typo_guard_retype(tmp_path: Path) -> None:
+    path = tmp_path / "cal.json"
+    # start, zero, first reading 7 % high -> retype (r), then Enter = simulated for the rest
+    answers = ["y", "y", "1.605", "r", "", "", "y", "", ""]
+    code, text = _run(
+        [*_SIM_ARGS, "--calibration", str(path), "--ranges", "0.5,1", "--mode", "quick"],
+        answers=answers,
+    )
+    assert "did you type it correctly? [y = accept / r = retype]" in text
+    assert code == 0, text
+    assert path.exists()
+
+
+def test_typo_guard_accept_does_not_loop(tmp_path: Path) -> None:
+    path = tmp_path / "cal.json"
+    answers = ["y", "y", "1.605", "y", "", "y", "", ""]
+    code, text = _run(
+        [*_SIM_ARGS, "--calibration", str(path), "--ranges", "0.5,1", "--mode", "quick"],
+        answers=answers,
+    )
+    assert text.count("[y = accept / r = retype]") == 1
+    assert code in (0, 1), text  # the biased reading may make the user decline the save
+
+
+def test_abort_after_the_file_was_written_reports_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from edu09.device.scope import Scope
+
+    path = tmp_path / "cal.json"
+    real = Scope.set_calibration
+
+    def boom(self: Scope, cal: object, **kw: object) -> None:
+        real(self, cal, **kw)  # type: ignore[arg-type]
+        if kw.get("save"):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(Scope, "set_calibration", boom)
+    code, text = _run(
+        [*_SIM_ARGS, "--calibration", str(path), "--ranges", "0.5,1", "--mode", "quick"],
+        answers=["y", "y", "", "", "y"],
+    )
+    assert code == 1
+    assert "nothing was saved" not in text
+    assert "WAS written" in text and str(path) in text
+    assert path.exists()

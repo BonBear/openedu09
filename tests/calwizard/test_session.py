@@ -473,6 +473,10 @@ def test_verify_detects_bad_calibration(unit1_scope: Scope, sim_ref: SimReferenc
     assert v.setup is not None and v.setup.kind == "verify"
     r = s.submit_reading(v.sim_reading_v * 1.03)  # type: ignore[operator]
     assert r.extra["verify"] == "fail"
+    while s.state is SessionState.SAVED:  # the positive verify follows
+        v = s.view()
+        assert v.setup is not None and v.setup.kind == "verify"
+        s.submit_reading(v.sim_reading_v * 1.03)  # type: ignore[operator]
     assert s.state is SessionState.DONE
     assert s.summary()["verify"] == "fail"
 
@@ -535,3 +539,46 @@ def test_empty_plan_goes_straight_to_fit(unit1_scope: Scope) -> None:
     v = s.start()
     assert v.state is SessionState.READY_TO_FIT and v.setup is None and v.needs == "none"
     s.abort()
+
+
+def test_reading_far_from_scope_is_flagged_as_possible_typo(
+    unit1_scope: Scope, sim_ref: SimReference
+) -> None:
+    s = _session(unit1_scope, sim_ref)
+    _to_reference(s)
+    v = s.view()
+    assert v.sim_reading_v is not None
+    r = s.submit_reading(v.sim_reading_v * 1.07)  # 7 % off, but inside the 15 % hard limit
+    assert r.status == "warning"
+    assert 4.0 < r.extra["reading_suspect"] < 12.0
+    assert any("type it correctly" in msg for msg in r.messages)
+
+
+def test_good_reading_is_not_flagged(unit1_scope: Scope, sim_ref: SimReference) -> None:
+    s = _session(unit1_scope, sim_ref)
+    _to_reference(s)
+    v = s.view()
+    assert v.sim_reading_v is not None
+    r = s.submit_reading(v.sim_reading_v * 1.01)
+    assert "reading_suspect" not in r.extra
+
+
+def test_exception_after_the_file_was_written_is_recorded(
+    unit1_scope: Scope, sim_ref: SimReference, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "cal.json"
+    storage.save_calibration(unit1_scope.calibration, path)  # an old file to back up
+    s = _session(unit1_scope, sim_ref, path=path)
+    drive(s, save=False)
+    real = type(unit1_scope).set_calibration
+
+    def boom(self: Scope, cal: units.Calibration, **kw: Any) -> None:
+        real(self, cal, **kw)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(type(unit1_scope), "set_calibration", boom)
+    with pytest.raises(KeyboardInterrupt):
+        s.save(confirm=True)
+    ps = s.partial_save
+    assert ps is not None and ps.path == path and ps.backup_path is not None
+    assert ps.backup_path.exists()

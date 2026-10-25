@@ -91,6 +91,8 @@ NO_SIGNAL_DIV: Final = 0.3
 SANITY_REL: Final = 0.15
 DRIFT_REL: Final = 0.003
 DRIFT_COUNTS: Final = 0.5
+TYPO_PCT: Final = 4.0
+"""A reference reading differing more than this (%) from the scope is flagged as a possible typo."""
 VERIFY_REL: Final = 0.005
 VERIFY_DIV: Final = 0.05
 MAX_READING_V: Final = tables.INPUT_ABS_MAX_V
@@ -163,6 +165,7 @@ class CalibrationSession:
         self._ground_map: dict[tuple[float, int], float] = {}
         self._fit: FitResult | None = None
         self._saved: SaveResult | None = None
+        self._partial_save: SaveResult | None = None
         self._saved_cal: units.Calibration | None = None
         self._apply_only = False
         self._reverted: SaveResult | None = None
@@ -200,6 +203,11 @@ class CalibrationSession:
     @property
     def fit_result(self) -> FitResult | None:
         return self._fit
+
+    @property
+    def partial_save(self) -> SaveResult | None:
+        """Set when the calibration file was written but installing/saving then raised."""
+        return self._partial_save
 
     @property
     def log_path(self) -> Path | None:
@@ -575,7 +583,7 @@ class CalibrationSession:
             if s.kind == "verify":
                 result = self._run_verify(s, v_ref, notes)
             else:
-                result = self._run_reference(s, v_ref, notes)
+                result = self._flag_typo(self._run_reference(s, v_ref, notes))
             with self._lock:
                 self._check_abort()
                 if result.status == "failed" and not (
@@ -785,6 +793,22 @@ class CalibrationSession:
             )
         return SetupResult(s.id, s.kind, status, points, tuple(msgs), v_ref)
 
+    @staticmethod
+    def _flag_typo(result: SetupResult) -> SetupResult:
+        """Warn when the typed reading is far from what the scope measured (pre-session
+        calibration): ``extra["reading_suspect"]`` = largest |error| in %."""
+        errs = [abs(p.err_pct) for p in result.points if p.usable and p.err_pct is not None]
+        if not errs or max(errs) <= TYPO_PCT:
+            return result
+        worst = max(errs)
+        msg = f"reading differs by {worst:.1f} % from the scope: did you type it correctly?"
+        return dataclasses.replace(
+            result,
+            status="warning" if result.status == "ok" else result.status,
+            messages=(*result.messages, msg),
+            extra={**result.extra, "reading_suspect": round(worst, 2)},
+        )
+
     def _run_verify(self, s: Setup, v_ref: float, notes: list[str]) -> SetupResult:
         keep, dropped = self._window_drop(s, v_ref)
         if not keep:
@@ -980,17 +1004,40 @@ class CalibrationSession:
         self, cal: units.Calibration, apply_only: bool
     ) -> tuple[bool, Path | None, Path | None]:
         if not apply_only:
+            t0 = time.time()
             try:
                 backup = self._scope.set_calibration(cal, save=True, path=self._path)
             except ValueError:
                 if self._path is not None:
                     raise
                 apply_only = True  # sim/replay scope without a calibration file
+            except BaseException:
+                self._note_partial_save(cal, t0)
+                raise
             else:
                 target = self._path or getattr(self._scope, "_calibration_path", None)
                 return True, backup, target
         self._scope.set_calibration(cal)
         return False, None, None
+
+    def _note_partial_save(self, cal: units.Calibration, t0: float) -> None:
+        """After a failure inside set_calibration(save=True): did the file get written?"""
+        target = self._path or getattr(self._scope, "_calibration_path", None)
+        if target is None:
+            return
+        try:
+            target = Path(target)
+            if storage.load_calibration(target).calibration_id != cal.calibration_id:
+                return
+            baks = [
+                f
+                for f in target.parent.glob(f"{target.stem}.*.bak{target.suffix}")
+                if f.stat().st_mtime >= t0 - 1.0
+            ]
+            backup = max(baks, key=lambda f: f.stat().st_mtime) if baks else None
+        except Exception:  # noqa: BLE001 - best effort diagnostics only
+            return
+        self._partial_save = SaveResult(True, backup, cal.calibration_id, target)
 
     def save(self, *, confirm: bool, apply_only: bool = False) -> SaveResult:
         """Install the fitted calibration and (unless ``apply_only``) save it with a backup.

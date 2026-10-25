@@ -372,6 +372,20 @@ def _run_session(
                 print(f"  {exc}", file=out)
                 continue
             _print_result(r, out)
+            suspect = r.extra.get("reading_suspect")
+            if suspect is not None and not yes:
+                ans = (
+                    ask(
+                        f"Reading differs by {suspect:.1f} % from the scope - did you type it "
+                        "correctly? [y = accept / r = retype] "
+                    )
+                    .strip()
+                    .lower()
+                )
+                if ans == "r":
+                    session.retry()
+                    shown = None
+                    continue
             if yes and r.status == "failed" and s.kind != "verify":
                 session.skip()  # a simulated run never loops on a failing step
             continue
@@ -419,6 +433,19 @@ def _open_scope(args: argparse.Namespace) -> tuple[Any, Any]:
         tr = SimTransport(device=dev)
     scope = Scope.open(tr, calibration=args.calibration, reconnect_interval_s=0.05)
     return scope, SimReference.for_scope(scope)
+
+
+def _saved_note(session: Any, was_saved: bool) -> str:
+    if was_saved:
+        return "the calibration saved before stays in use"
+    ps = None if session is None else session.partial_save
+    if ps is not None:
+        bak = f"; backup of the previous file: {ps.backup_path}" if ps.backup_path else ""
+        return (
+            f"the calibration file WAS written ({ps.path}, id {ps.calibration_id}){bak}. "
+            "Check it, or restore the backup"
+        )
+    return "nothing was saved"
 
 
 def main(
@@ -491,16 +518,15 @@ def main(
         if session is not None:
             session.abort()
             was_saved = session.summary()["saved"] is not None
-        print(
-            "\naborted; "
-            + ("the calibration saved before stays in use" if was_saved else "nothing was saved"),
-            file=o,
-        )
+        print("\naborted; " + _saved_note(session, was_saved), file=o)
         return 1
-    except Edu09Error as exc:
+    except (Edu09Error, OSError) as exc:
         if session is not None:
             session.abort()
         print(f"{PROG}: {exc}", file=sys.stderr)
+        note = _saved_note(session, session is not None and session.summary()["saved"] is not None)
+        if session is not None and session.partial_save is not None:
+            print(note, file=sys.stderr)
         return 1
     finally:
         scope.close()

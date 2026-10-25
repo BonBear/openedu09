@@ -65,6 +65,9 @@ ADJUSTABLE_MARGIN: Final = 0.08
 """Adjustable setups must accept at least +-8 % around the value to set."""
 VERIFY_MAX_RANGES: Final = 3
 VERIFY_SHIFT_DIV: Final = 1.0
+VERIFY_MARGIN: Final = 0.08
+"""Verify points keep this fraction of the window width away from both window edges, so a
+slightly different meter reading does not drop the point."""
 EST_S_PER_ACTION: Final = 30.0
 EST_S_PER_POINT: Final = 0.8
 EST_S_ZERO: Final = 15.0
@@ -404,16 +407,29 @@ def _instruction_reference(s: Setup, source: Source, swap: bool, first_of_source
     return " ".join(parts)
 
 
-def _verify_setup(last: Setup, source: Source, options: PlanOptions) -> Setup | None:
+def _verify_cands(volts: float, options: PlanOptions) -> list[tuple[float, float]]:
+    """(distance from mid-scale, range) of the ranges that put ``volts`` inside the verify
+    window with a margin (the exact window as a fallback)."""
+    mag = abs(volts)
+    w0, w1 = VERIFY_WINDOW
+    m = VERIFY_MARGIN * (w1 - w0)
+    for lo, hi in ((w0 + m, w1 - m), (w0, w1)):
+        cands = [
+            (abs(mag / v - 3.5), v) for v in options.ranges if lo - _EPS <= mag / v <= hi + _EPS
+        ]
+        if cands:
+            return cands
+    return []
+
+
+def _verify_setup(
+    last: Setup, source: Source, options: PlanOptions, *, reconnect: str | None = None
+) -> Setup | None:
     assert last.volts is not None
     sign = 1 if last.volts > 0 else -1
     mag = abs(last.volts)
     neg = sign < 0
-    cands: list[tuple[float, float]] = []
-    for v in options.ranges:
-        d = mag / v
-        if VERIFY_WINDOW[0] - _EPS <= d <= VERIFY_WINDOW[1] + _EPS:
-            cands.append((abs(d - 3.5), v))
+    cands = _verify_cands(last.volts, options)
     if not cands:
         return None
     picked = sorted(v for _, v in sorted(cands)[:VERIFY_MAX_RANGES])
@@ -428,12 +444,18 @@ def _verify_setup(last: Setup, source: Source, options: PlanOptions) -> Setup | 
                 break
         points.append(MeasurePoint(v, p, sign * d, "verify"))
     acc = _signed(_intersect([_point_accept_v(p) for p in points]), sign)
-    instr = (
-        f"Verify: keep {source.label} connected as in the last step"
-        + (" (same setting)" if isinstance(source, AdjustableSource) else "")
-        + ". Re-read the multimeter and type the reading; the scope now measures it through the "
+    tail = (
+        "Re-read the multimeter and type the reading; the scope now measures it through the "
         "new calibration at different positions."
     )
+    if reconnect is None:
+        instr = (
+            f"Verify: keep {source.label} connected as in the last step"
+            + (" (same setting)" if isinstance(source, AdjustableSource) else "")
+            + f". {tail}"
+        )
+    else:
+        instr = f"Verify: {reconnect} {tail}"
     return Setup(
         "",
         "verify",
@@ -677,6 +699,31 @@ def plan_calibration(sources: Sequence[Source], options: PlanOptions | None = No
         vs = _verify_setup(last, src, opts)
         if vs is not None:
             verify.append(vs)
+        if last.volts is not None and last.volts < 0:
+            # also verify a positive mid-scale point (the negative one is a small range)
+            best_pos: tuple[float, Setup] | None = None
+            for r in refs:
+                if r.volts is None or r.volts <= 0:
+                    continue
+                cs = _verify_cands(r.volts, opts)
+                if cs and (best_pos is None or min(cs)[0] < best_pos[0]):
+                    best_pos = (min(cs)[0], r)
+            if best_pos is not None:
+                rs = best_pos[1]
+                psrc = next(x for x in srcs if x.label == rs.source_label)
+                same = psrc.label == last.source_label
+                how = (
+                    f"swap the leads at {psrc.label}: probe tip on + and the ground clip on -."
+                    if same
+                    else f"connect {psrc.label} to CH1: probe tip on + and the ground clip on -."
+                )
+                if isinstance(psrc, AdjustableSource):
+                    how += f" Set it to {_fmt_v(rs.volts or 0.0)} V."
+                else:
+                    how += f" Nominal {_fmt_v(rs.volts or 0.0)} V."
+                pv = _verify_setup(rs, psrc, opts, reconnect=how)
+                if pv is not None:
+                    verify.append(pv)
 
     ground_pts = sorted(
         {(p.vdiv, p.position_div) for s in (*refs, *verify) for p in s.points},

@@ -65,7 +65,8 @@ def test_profile_usb_aa_snapshot() -> None:
         ),
         ("S03", "reference", "AA", 1.5, ((0.5, -1.5, 3.0, "gain_pos"),)),
         ("S04", "reference", "AA", -1.5, ((0.5, 1.5, -3.0, "gain_neg"),)),
-        ("S05", "verify", "AA", -1.5, ((1.0, 1.75, -1.5, "verify"), (0.5, 2.5, -3.0, "verify"))),
+        ("S05", "verify", "AA", -1.5, ((0.5, 2.5, -3.0, "verify"),)),
+        ("S06", "verify", "AA", 1.5, ((0.5, -0.5, 3.0, "verify"),)),
     ]
     assert plan.setups[0].kind == "zero"
     cov = {c.vdiv: (c.pos, c.neg, c.nonlin) for c in plan.coverage}
@@ -80,8 +81,8 @@ def test_profile_usb_aa_snapshot() -> None:
     needs5 = " ".join(next(c for c in plan.coverage if c.vdiv == 5.0).needs)
     assert "above the 15 V limit" in needs5
     assert FLOATING_WARNING in plan.warnings
-    assert plan.reconnections == 2  # USB -> AA, AA lead swap
-    assert plan.user_actions == 4
+    assert plan.reconnections == 3  # USB -> AA, AA lead swap, verify swap
+    assert plan.user_actions == 5
     assert plan.estimated_s > 0
 
 
@@ -97,7 +98,7 @@ def test_profile_bench15_snapshot() -> None:
         assert (cov[v].pos, cov[v].neg, cov[v].nonlin) == ("good", "good", "good")
     assert cov[5.0].nonlin == "missing"
     assert any("nonlinearity" in n and "above the 15 V limit" in n for n in cov[5.0].needs)
-    assert plan.reconnections == 1  # one lead swap
+    assert plan.reconnections == 2  # lead swap + the positive verify swap
     assert plan.setups[-1].kind == "verify"
 
 
@@ -217,13 +218,38 @@ def test_adjustable_setups_accept_8_percent() -> None:
 def test_verify_uses_last_reference_and_shifted_positions() -> None:
     plan = plan_calibration([USB, AA])
     last_ref = [s for s in plan.setups if s.kind == "reference"][-1]
-    ver = plan.setups[-1]
+    ver = [s for s in plan.setups if s.kind == "verify"][0]
     assert (ver.source_label, ver.volts) == (last_ref.source_label, last_ref.volts)
     assert 1 <= len(ver.points) <= 3
     for p in ver.points:
         fit_pos = position_for(abs(p.expected_div), p.expected_div < 0)
         assert abs(abs(p.position_div - fit_pos) - 1.0) < 1e-9
     assert plan_calibration([USB, AA], PlanOptions(verify=False)).setups[-1].kind != "verify"
+
+
+def test_verify_points_keep_a_margin_from_the_window_edge() -> None:
+    from edu09.calwizard.model import VERIFY_WINDOW
+
+    w0, w1 = VERIFY_WINDOW
+    m = 0.08 * (w1 - w0)
+    for prof in ("usb_aa", "bench15", "bench30_norev"):
+        plan = plan_calibration(PROFILES[prof])
+        for s in plan.setups:
+            if s.kind == "verify":
+                for p in s.points:
+                    assert w0 + m - 1e-9 <= abs(p.expected_div) <= w1 - m + 1e-9
+
+
+def test_positive_verify_follows_negative_one() -> None:
+    plan = plan_calibration(PROFILES["bench15"])
+    vs = [s for s in plan.setups if s.kind == "verify"]
+    assert len(vs) == 2
+    assert vs[0].volts is not None and vs[0].volts < 0
+    assert vs[1].volts is not None and vs[1].volts > 0
+    assert "swap the leads" in vs[1].instruction
+    # a positive-only plan gets a single verify
+    pos_only = plan_calibration([FixedSource("USB", 5.0)])
+    assert [s.kind for s in pos_only.setups].count("verify") == 1
 
 
 def test_no_zero_option() -> None:
