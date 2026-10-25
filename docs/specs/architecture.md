@@ -270,7 +270,19 @@ No x4 upsampling or smoothing happens in the driver; that is a display concern.
 ### 4.3 Units and calibration
 
 `Calibration` (frozen): `base_ofs=0x80`, `range_corr: dict[float,int]`, `gnd_fit=(k=2.0, b=-128.0)` (fit in the "ad = 255 - raw" domain against the absolute DAC byte, per protocol.md 5.3; 0 V -> raw 127, trigger byte 127),
-`counts_per_div=32`, `adc_inverted=tables.ADC_INVERTED`, `source: "default"|"typical"|"file"|"ini-import"|"measured"`.
+`counts_per_div=32`, `adc_inverted=tables.ADC_INVERTED`, `source: "default"|"typical"|"file"|"ini-import"|"measured"`,
+`range_gain: dict[float,float]` (per-range gain correction `g = V_true / V_read`, `0.8 < g < 1.25`, missing = 1.0;
+like `range_corr` excluded from `hash()`, JSON keys are strings) and the reserved `neg_nonlinearity` (opaque JSON
+object or None; round-tripped, part of `calibration_id`, NOT applied; placeholder for a future piecewise
+correction of large negative deflections, protocol.md 11.3). `from_dict` still rejects unknown keys.
+Gain: `Calibration.effective_counts_per_div(vdiv) = counts_per_div / range_gain_for(vdiv)` is used by every
+counts <-> volts path (`counts_to_volts` multiplies by g, `volts_to_counts`/`volts_to_raw`/`trigger_byte` divide)
+and by the position -> offset DAC conversion, so the ADC window stays centred on the screen. `level_range_v()`
+(model, calibration-free) stays the 8-division screen window; with g < 1 the ADC span is up to ~2.6 % smaller
+than the screen (it saturates just inside the edges), and an out-of-ADC trigger level is clamped to 0/255. HW-measured gains
+(one unit, 2026-10-25) are `tables.TYPICAL_RANGE_GAIN`, included in `Calibration.typical()`. The offset
+calibration (`measure_calibration`) carries `range_gain`/`neg_nonlinearity` over unchanged;
+`calibration.gain_from_reference` (CLI `edu09-gain`) measures one range against a DC reference.
 `Calibration()` is the idealised model of the original's demo mode; the simulator's front end and the test
 fixtures use it, so sim/replay scopes keep it. Real units have a DAC slope of only ~1.03 counts per step
 (HW-measured 2026-10-24: `base_ofs=0x86`, `range_corr={1 V: -1, 0.1 V: -1}`, `k~1.03`, `b~-9.8`), so with

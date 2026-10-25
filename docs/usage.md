@@ -119,8 +119,51 @@ Values measured on the development unit (yours will differ slightly): base offse
 range corrections `{1 V: -1, 0.1 V: -1}` DAC steps, ground fit slope k ~ 1.03 counts per DAC
 step, b ~ -9.8. Plausible results: base offset within 0x5A..0xA6, k about 1.0. A failure message
 starting with "CALIBRATION FAILED" usually means a voltage is connected. Afterwards 0 V should
-read within +-0.1 div (we saw +-0.05 div) at every range and position. Vertical gain is not part
-of the calibration.
+read within +-0.1 div (we saw +-0.05 div) at every range and position. The offset calibration
+keeps any stored gain corrections (below) unchanged.
+
+### Gain (per range)
+
+Uncorrected, the scope reads a few per cent high, by a different factor on each range. The
+correction factor `g = V_true / V_read` per V/div range is stored in `calibration.json` under
+`range_gain` (string keys in V/div; missing ranges use 1.0; accepted values `0.8 < g < 1.25`):
+
+```json
+{
+  "version": 1,
+  "calibration": {
+    "adc_inverted": false,
+    "base_ofs": 134,
+    "counts_per_div": 32.0,
+    "gnd_fit": {"b": -9.8, "k": 1.03},
+    "range_corr": {"0.1": -1, "1": -1},
+    "range_gain": {"0.1": 0.987, "0.2": 0.975, "0.5": 0.974, "1": 0.996, "2": 0.981, "5": 0.979},
+    "source": "measured"
+  }
+}
+```
+
+(The values above are the development unit's; files without `range_gain` load as uncorrected.
+The key `neg_nonlinearity` is reserved for a future correction of large negative deflections;
+leave it out.) The file lives in the user config directory (`~/.config/edu09/calibration.json` on
+Linux). Restart the GUI / MCP server after editing it by hand.
+
+To measure a range: run the offset calibration first, connect a stable DC source (a battery or
+a bench supply) to CH1, DC coupling, and measure it with a multimeter at the same time. Pick the
+range so that the level is **2.4-6 divisions above ground** (positive voltages only; do not put
+ground or the level at the screen edges / positions +-4), then, with the GUI and MCP server
+closed:
+
+```bash
+edu09-gain --vref 4.95 --vdiv 1          # prints range_gain[1] = 0.99xx
+edu09-gain --vref 4.95 --vdiv 1 --save   # also stores it (the old file is backed up)
+```
+
+It averages 4 free-run frames at 5 ms/div (trigger off) against the current calibration without
+its gain and centres ground and level on screen (`--position` overrides the ground position).
+From Python: `edu09.device.calibration.gain_from_reference(scope, v_ref, volts_per_div)` returns
+the factor; `scope.set_calibration(scope.calibration.with_range_gain({1.0: g}), save=True)`
+stores it.
 
 ## Hardware tests
 

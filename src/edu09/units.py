@@ -9,12 +9,18 @@ Count domains (protocol.md 5.2/5.3):
   ground level in this domain: ``gnd_ad = k * dac + b`` where ``dac = base_ofs + ypos`` (the
   range correction is *not* part of the fit, as in ``y1_viiva``). ``GndFit`` stores (k, b).
 
-Volts are ``(raw - gnd_raw) * volts_per_div / counts_per_div``, negated when the ADC is inverted
-(``Calibration.adc_inverted``, default ``tables.ADC_INVERTED``; open question Q3).
+Volts are ``(raw - gnd_raw) * volts_per_div * gain / counts_per_div``, negated when the ADC is
+inverted (``Calibration.adc_inverted``, default ``tables.ADC_INVERTED``; open question Q3).
+``gain = Calibration.range_gain_for(volts_per_div)`` (default 1.0) is the per-range gain correction
+``V_true / V_read``; equivalently the effective counts per division of a range is
+``counts_per_div / gain`` (``Calibration.effective_counts_per_div``). Every counts <-> volts path
+(``counts_to_volts``, ``volts_to_counts``, ``volts_to_raw``, ``trigger_byte``, the position ->
+offset DAC mapping) uses the effective value.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -38,6 +44,19 @@ from edu09.model import (
 )
 from edu09.protocol import tables
 from edu09.protocol.commands import HwConfig
+
+_CAL_KEYS: frozenset[str] = frozenset(
+    {
+        "base_ofs",
+        "range_corr",
+        "gnd_fit",
+        "counts_per_div",
+        "adc_inverted",
+        "source",
+        "range_gain",
+        "neg_nonlinearity",
+    }
+)
 
 __all__ = [
     "Calibration",
@@ -108,6 +127,16 @@ class Calibration:
     (missing entries mean 0). It is excluded from ``hash()`` (dicts are unhashable) but compared
     by ``==``.
 
+    ``range_gain`` maps a volts/div value to a gain correction ``g = V_true / V_read`` measured
+    against a reference (``tables.RANGE_GAIN_MIN < g < tables.RANGE_GAIN_MAX``; missing entries
+    mean 1.0). Volts are multiplied by ``g``; the effective counts per division is
+    ``counts_per_div / g``. Excluded from ``hash()`` like ``range_corr``.
+
+    ``neg_nonlinearity`` is RESERVED for a future optional piecewise correction of large negative
+    deflections (front-end nonlinearity, protocol.md 11.3). This version stores it as opaque JSON
+    data (any JSON object, or ``None`` = absent), round-trips it through :meth:`to_dict` and
+    includes it in :attr:`calibration_id`, but does NOT apply it.
+
     ``Calibration()`` is the idealised model of the original's demo mode (base 0x80, slope 2
     counts per DAC step: 0 V -> raw 127). The simulator's front end and the test fixtures use it.
     A real unit is better described by :meth:`typical` (HW-measured slope ~1.03), which
@@ -120,6 +149,8 @@ class Calibration:
     counts_per_div: float = tables.COUNTS_PER_DIV
     adc_inverted: bool = tables.ADC_INVERTED
     source: CalibrationSource = "default"
+    range_gain: Mapping[float, float] = field(default_factory=dict, hash=False)
+    neg_nonlinearity: Mapping[str, Any] | None = field(default=None, hash=False)
 
     def __post_init__(self) -> None:
         _int_in(self.base_ofs, tables.OFFSET_DAC_MIN, tables.OFFSET_DAC_MAX, "base_ofs")
@@ -148,43 +179,70 @@ class Calibration:
             raise CalibrationError(f"adc_inverted must be a bool, got {self.adc_inverted!r}")
         if self.source not in _SOURCES:
             raise CalibrationError(f"source {self.source!r} not in {_SOURCES}")
+        object.__setattr__(self, "range_gain", _parse_range_gain(self.range_gain))
+        object.__setattr__(self, "neg_nonlinearity", _parse_opaque(self.neg_nonlinearity))
 
     @classmethod
     def typical(cls) -> Calibration:
         """Measured typical values of a real EDU09 (``source="typical"``, protocol.md 11).
 
         Fallback for hardware without a calibration file: positions scale correctly (slope
-        ~1.03 instead of the default model's 2) and 0 V is within a few counts. A per-unit
-        calibration (``Scope.calibrate``) is still more accurate.
+        ~1.03 instead of the default model's 2) and 0 V is within a few counts. The per-range
+        gains (``tables.TYPICAL_RANGE_GAIN``) were measured on one unit only. A per-unit
+        calibration (``Scope.calibrate`` plus measured gains) is still more accurate.
         """
         return cls(
             base_ofs=tables.TYPICAL_BASE_OFS,
             range_corr=dict(tables.TYPICAL_RANGE_CORR),
             gnd_fit=GndFit(tables.TYPICAL_GND_K, tables.TYPICAL_GND_B),
             source="typical",
+            range_gain=dict(tables.TYPICAL_RANGE_GAIN),
         )
 
     def range_correction(self, vdiv: VoltsPerDiv | float) -> int:
         return self.range_corr.get(float(vdiv), 0)
 
+    def range_gain_for(self, vdiv: VoltsPerDiv | float) -> float:
+        """Gain correction ``V_true / V_read`` of a range (1.0 when not calibrated)."""
+        return self.range_gain.get(float(vdiv), 1.0)
+
+    def effective_counts_per_div(self, vdiv: VoltsPerDiv | float) -> float:
+        """Raw counts per (true) division of a range: ``counts_per_div / range_gain_for``."""
+        return self.counts_per_div / self.range_gain_for(vdiv)
+
+    def with_range_gain(self, gains: Mapping[Any, float]) -> Calibration:
+        """Copy with ``gains`` merged into ``range_gain`` (keys as accepted by ``VoltsPerDiv``)."""
+        merged: dict[Any, float] = dict(self.range_gain)
+        merged.update({float(VoltsPerDiv.parse(k)): v for k, v in gains.items()})
+        return dataclasses.replace(self, range_gain=merged)
+
     def to_dict(self) -> dict[str, Any]:
-        """JSON-friendly dict (``range_corr`` keys become strings such as ``"0.1"``)."""
-        return {
+        """JSON-friendly dict (``range_corr``/``range_gain`` keys become strings such as ``"0.1"``).
+
+        ``neg_nonlinearity`` is only present when set (reserved, opaque).
+        """
+        d: dict[str, Any] = {
             "base_ofs": self.base_ofs,
             "range_corr": {f"{k:g}": v for k, v in sorted(self.range_corr.items())},
             "gnd_fit": {"k": self.gnd_fit.k, "b": self.gnd_fit.b},
             "counts_per_div": self.counts_per_div,
             "adc_inverted": self.adc_inverted,
             "source": self.source,
+            "range_gain": {f"{k:g}": v for k, v in sorted(self.range_gain.items())},
         }
+        if self.neg_nonlinearity is not None:
+            d["neg_nonlinearity"] = json.loads(json.dumps(self.neg_nonlinearity))
+        return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> Calibration:
-        """Inverse of :meth:`to_dict`. Missing keys take defaults; bad data -> CalibrationError."""
+        """Inverse of :meth:`to_dict`. Missing keys take defaults; bad data -> CalibrationError.
+
+        Unknown keys are rejected; the reserved ``neg_nonlinearity`` key is accepted (opaque).
+        """
         if not isinstance(d, Mapping):
             raise CalibrationError(f"calibration must be a mapping, got {type(d).__name__}")
-        allowed = {"base_ofs", "range_corr", "gnd_fit", "counts_per_div", "adc_inverted", "source"}
-        unknown = sorted(set(d) - allowed)
+        unknown = sorted(set(d) - _CAL_KEYS)
         if unknown:
             raise CalibrationError(f"unknown calibration key(s) {unknown}")
         kwargs: dict[str, Any] = dict(d)
@@ -201,6 +259,44 @@ class Calibration:
         """Stable id ``"<source>:<10 hex>"`` derived from the calibration values."""
         payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return f"{self.source}:{hashlib.sha256(payload.encode()).hexdigest()[:10]}"
+
+
+def _parse_range_gain(value: object) -> dict[float, float]:
+    if not isinstance(value, Mapping):
+        raise CalibrationError("range_gain must be a mapping of volts/div -> float")
+    gains: dict[float, float] = {}
+    for key, val in value.items():
+        try:
+            vdiv = float(VoltsPerDiv.parse(key))
+        except ValueError as exc:
+            raise CalibrationError(f"range_gain key: {exc}") from None
+        if isinstance(val, bool) or not isinstance(val, int | float):
+            raise CalibrationError(f"range_gain[{vdiv:g}] must be a number, got {val!r}")
+        g = float(val)
+        if not tables.RANGE_GAIN_MIN < g < tables.RANGE_GAIN_MAX:  # also rejects NaN
+            raise CalibrationError(
+                f"range_gain[{vdiv:g}] {g!r} out of range "
+                f"({tables.RANGE_GAIN_MIN:g}, {tables.RANGE_GAIN_MAX:g})"
+            )
+        gains[vdiv] = g
+    return gains
+
+
+def _parse_opaque(value: object) -> dict[str, Any] | None:
+    """Reserved opaque JSON object (deep-copied through JSON so it stays serialisable)."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise CalibrationError(
+            f"neg_nonlinearity must be a JSON object or null, got {type(value).__name__}"
+        )
+    try:
+        copied = json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise CalibrationError(f"neg_nonlinearity is not JSON-serialisable: {exc}") from None
+    if not isinstance(copied, dict):  # pragma: no cover - a Mapping always dumps as an object
+        raise CalibrationError("neg_nonlinearity must be a JSON object")
+    return copied
 
 
 # --------------------------------------------------------------------------------------------
@@ -247,10 +343,12 @@ def _ypos_steps(ch: ChannelSettings, cal: Calibration) -> int:
     """Position (divisions) -> offset DAC steps through the ground fit slope.
 
     A positive ``position_div`` moves ground up, i.e. towards larger voltages:
-    raw shift = +position * counts_per_div (negated for an inverted ADC), and
-    ``d gnd_raw / d dac = -k``.
+    raw shift = +position * effective counts_per_div (negated for an inverted ADC), and
+    ``d gnd_raw / d dac = -k``. Using the gain-corrected counts per division keeps the ADC
+    window centred on the screen.
     """
-    raw_shift = ch.position_div * cal.counts_per_div * (-1.0 if cal.adc_inverted else 1.0)
+    cpd = cal.effective_counts_per_div(ch.volts_per_div)
+    raw_shift = ch.position_div * cpd * (-1.0 if cal.adc_inverted else 1.0)
     steps = round(-raw_shift / cal.gnd_fit.k)
     return int(min(max(steps, -128), 127))
 
@@ -267,7 +365,7 @@ def gnd_counts(ch: ChannelSettings, cal: Calibration) -> float:
 
 
 def _volts_per_count(ch: ChannelSettings, cal: Calibration) -> float:
-    vpc = float(ch.volts_per_div) / cal.counts_per_div
+    vpc = float(ch.volts_per_div) / cal.effective_counts_per_div(ch.volts_per_div)
     return -vpc if cal.adc_inverted else vpc
 
 

@@ -13,7 +13,7 @@ USB PC oscilloscope kit.
 *The GUI running against the built-in simulator (`--simulate`).*
 
 **Naming:** the project and PyPI distribution are called `openedu09`; the Python import package
-is `edu09` and the commands are `edu09-gui`, `edu09-mcp` and `edu09-probe`.
+is `edu09` and the commands are `edu09-gui`, `edu09-mcp`, `edu09-probe` and `edu09-gain`.
 
 Runs on Linux and Windows (Python 3.12+). The protocol was worked out for interoperability and then
 verified on real hardware (see [docs/protocol.md](docs/protocol.md)).
@@ -126,14 +126,17 @@ More in [docs/usage.md](docs/usage.md) (GUI tour, MCP tools, calibration, hardwa
   made). Do not run it with a signal connected.
 - Only one program can use the scope at a time; the second one gets a clear "device busy"
   message naming the owner.
-- The vertical **gain is not calibrated**: expect roughly +-5-10 % error on voltages until you
-  have checked it against a reference.
+- The vertical gain is corrected per range (`range_gain` in `calibration.json`; typical values
+  measured on one unit are the default when no calibration file exists). Measure your own unit
+  against a DC reference with `edu09-gain` (docs/usage.md) for best accuracy.
 
 ## Project status and limitations
 
 Alpha (0.1.0, unreleased). Known limitations:
 
-- Vertical gain is **uncalibrated** (roughly +-5-10 % voltage error).
+- Vertical gain: per-range correction (`range_gain`) is supported; uncorrected units read
+  0.4-2.6 % high. Large **negative** deflections (more than ~3-4 div below ground) still read up
+  to ~6 % too large (front-end nonlinearity, under investigation).
 - **Windows is untested** (no test machine); CI only runs the simulator-based tests.
 - Intermittent readout timeouts at startup are known and under investigation.
 - Single channel (CH1) only; other firmware versions untested.
@@ -152,7 +155,11 @@ Driver, simulator, GUI and MCP server are implemented and were exercised on one 
   reads within 0.05 div on all ranges and positions.
 - The vendor's 0x0D "live" command does not return samples on fw 1.01 and is never sent.
 
-Not yet verified: Windows (no test machine), other firmware versions, vertical gain accuracy.
+- Vertical gain against a multimeter on all six ranges: reads 0.4-2.6 % high uncorrected (now
+  corrected per range).
+
+Not yet verified: Windows (no test machine), other firmware versions, linearity of large negative
+deflections.
 
 ## Development
 

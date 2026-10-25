@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -274,11 +274,22 @@ def test_typical_calibration_values() -> None:
     assert cal.range_corr == {1.0: -1, 0.1: -1}
     assert cal.gnd_fit == units.GndFit(1.03, -9.8)
     assert units.Calibration.from_dict(cal.to_dict()) == cal
-    # ground near mid-scale; one division of position ~31 DAC steps (not 16 as with slope 2)
+    assert cal.range_gain == {
+        0.1: 0.987,
+        0.2: 0.975,
+        0.5: 0.974,
+        1.0: 0.996,
+        2.0: 0.981,
+        5.0: 0.979,
+    }
+    # ground near mid-scale; one division of position ~32 DAC steps (not 16 as with slope 2):
+    # 32 / 0.981 = 32.6 counts per true division at 2 V/div, / 1.03 counts per DAC step
     ch = ChannelSettings(VoltsPerDiv.V2)
     assert units.gnd_counts(ch, cal) == pytest.approx(126.8, abs=0.1)
     up = ChannelSettings(VoltsPerDiv.V2, position_div=1.0)
-    assert cal.base_ofs - units.offset_dac(up, cal) == 31
+    assert cal.base_ofs - units.offset_dac(up, cal) == 32
+    no_gain = replace(cal, range_gain={})
+    assert no_gain.base_ofs - units.offset_dac(up, no_gain) == 31
     # the uncalibrated model is unchanged (sim and fixtures depend on it)
     assert units.Calibration().gnd_fit == units.GndFit(2.0, -128.0)
     assert units.Calibration().base_ofs == tables.OFFSET_DAC_DEFAULT

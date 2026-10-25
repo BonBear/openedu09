@@ -12,7 +12,7 @@ pip install -e '.[gui,dev]'                        # development (tests, ruff, m
 
 With uv: `uv sync --all-extras` (or `uv pip install -e '.[gui]'`).
 
-This installs `edu09-gui`, `edu09-mcp` and `edu09-probe`. Try without hardware first:
+This installs `edu09-gui`, `edu09-mcp`, `edu09-probe` and `edu09-gain`. Try without hardware first:
 `edu09-gui --simulate "sine:1khz:2vpp"`.
 
 ## Linux

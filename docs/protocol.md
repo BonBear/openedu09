@@ -308,6 +308,10 @@ counts per division = 32
 **Unknown**. The GUI works in an inverted "screen" domain (`255 - raw`), and the exported GND is
 `255 - efb228` (0x5da1e8). Verify on hardware.
 
+Hardware (section 11.3): the real gain is a few per cent higher than 32 counts/div and differs per range;
+the driver corrects it with a per-range factor `g = V_true / V_read` (`Calibration.range_gain`), i.e. an
+effective `32 / g` counts per division.
+
 ### 5.3 Offset DAC and ground level
 
 - **Offset DAC byte** (Observed, `Set_DACs` 0x5c6d04, `TrackBar1Change` 0x5c8300):
@@ -616,3 +620,25 @@ Driver calibration (`Scope.calibrate`, free-run frame means at 5 ms/div) on the 
 26. **Calibration noise check**: the very first reading right after `Scope.open()` once failed the noise check
     (6.0 counts rms vs ~0.7 normally), consistent with settling from the previous DAC state. Besides the
     settle wait, the calibration now retries a too-noisy first reading once after an extra 100 ms settle.
+
+### 11.3 Vertical gain and negative nonlinearity (2026-10-25)
+
+DC reference voltages on CH1, measured at the same time with a multimeter; 5 ms/div, trigger off, frame means
+averaged; the offset/ground calibration of 11.2 checked accurate within ~1 count at all positions first.
+
+27. **Per-range gain error**: the scope reads **too high by 0.4-2.6 %**, by a factor that depends on the range
+    (positive levels 2.4-6 div above ground). Correction factor `g = V_true / V_read` on the development unit:
+
+    | V/div | 0.1 | 0.2 | 0.5 | 1 | 2 | 5 |
+    |---|---|---|---|---|---|---|
+    | g | 0.987 | 0.975 | 0.974 | 0.996 | 0.981 | 0.979 |
+
+    Equivalently the true sensitivity is `32 / g` counts/div (e.g. 0.5 V/div ~32.85). The driver stores these
+    per unit in `Calibration.range_gain` (calibration.json key `range_gain`, missing = 1.0) and applies them in
+    every counts <-> volts path, the trigger byte and the position -> offset DAC mapping. The table is
+    `tables.TYPICAL_RANGE_GAIN`, used by `Calibration.typical()` (measured on one unit only). Measure your
+    own with `edu09-gain` / `edu09.device.calibration.gain_from_reference` (docs/usage.md).
+28. **Negative large-deflection nonlinearity (under investigation)**: levels more than ~3-4 div *below* ground
+    read up to **~6 % too large** in magnitude on top of the gain error (front-end nonlinearity). Not
+    corrected yet. The calibration JSON reserves the key `neg_nonlinearity` (opaque object, loaded and saved
+    unchanged, part of `calibration_id`, not applied) for a future optional piecewise correction.

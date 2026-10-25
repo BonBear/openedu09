@@ -149,6 +149,20 @@ TYPICAL_BASE_OFS: Final = 0x86
 TYPICAL_RANGE_CORR: Final[dict[float, int]] = {1.0: -1, 0.1: -1}
 TYPICAL_GND_K: Final = 1.03
 TYPICAL_GND_B: Final = -9.8
+TYPICAL_RANGE_GAIN: Final[dict[float, float]] = {
+    0.1: 0.987,
+    0.2: 0.975,
+    0.5: 0.974,
+    1.0: 0.996,
+    2.0: 0.981,
+    5.0: 0.979,
+}
+"""Per-range gain correction ``V_true / V_read`` measured on ONE unit (2026-10-25: DC reference vs
+multimeter, 5 ms/div, levels 2.4-6 div above ground). The uncorrected scope reads 0.4-2.6 % high,
+i.e. the true counts per division is ``COUNTS_PER_DIV / gain`` (protocol.md 11.3)."""
+RANGE_GAIN_MIN: Final = 0.8
+RANGE_GAIN_MAX: Final = 1.25
+"""Accepted gain corrections are ``RANGE_GAIN_MIN < gain < RANGE_GAIN_MAX`` (exclusive)."""
 
 # Neutral CH2 bytes (architecture.md 4.1: CH2 not modelled -> DC, 2 V/div, offset 0x80). Q9.
 CH2_NEUTRAL_CFG: Final = GAIN_CODES_CH2[2.0] | CH2_DC_BIT  # 0x29

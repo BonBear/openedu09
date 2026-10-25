@@ -27,13 +27,23 @@ Steps (count domains as in ``units``: raw = sample, ad = 255 - raw):
    most :data:`RANGE_CORR_LIMIT` steps (a larger one means a DC voltage on the input).
 
 ``measure_calibration`` returns ``Calibration(source="measured")``; ``Scope.calibrate`` installs
-and saves it.
+and saves it. The per-range gains (``Calibration.range_gain``) and the reserved
+``neg_nonlinearity`` data of the current calibration are carried over unchanged: offsets are
+measured with an open input, gains need a reference voltage.
+
+**Gain** (separate, needs a DC reference and a multimeter): :func:`gain_from_reference` measures
+the mean voltage of a known positive DC level with trigger off at 5 ms/div against the current
+calibration *without* its gain correction and returns ``g = V_ref / V_read`` for
+``Calibration.range_gain``. CLI: ``edu09-gain`` (:func:`main`).
 """
 
 from __future__ import annotations
 
+import argparse
+import dataclasses
 import logging
-from collections.abc import Callable, Iterable
+import sys
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -42,7 +52,7 @@ import numpy as np
 from edu09 import units
 from edu09.device.scope import Scope
 from edu09.device.worker import DeviceIO
-from edu09.errors import CalibrationError
+from edu09.errors import CalibrationError, Edu09Error
 from edu09.model import ChannelSettings, Coupling, Settings, Timebase, TriggerMode, VoltsPerDiv
 from edu09.protocol import tables
 
@@ -51,7 +61,10 @@ __all__ = [
     "CAL_FRAMES",
     "CAL_TIMEBASE",
     "CAL_WINDOW",
+    "GAIN_FRAMES",
     "LevelReading",
+    "gain_from_reference",
+    "main",
     "measure_calibration",
 ]
 
@@ -295,6 +308,8 @@ def _measure(io: DeviceIO) -> units.Calibration:
         counts_per_div=cur.counts_per_div,
         adc_inverted=cur.adc_inverted,
         source="measured",
+        range_gain=cur.range_gain,
+        neg_nonlinearity=cur.neg_nonlinearity,
     )
     log.info("calibration result: %s", cal.to_dict())
     return cal
@@ -309,3 +324,147 @@ def measure_calibration(scope: Scope, *, timeout_s: float = 300.0) -> units.Cali
     ``"CALIBRATION FAILED"``), ``AcquisitionTimeout``, ``DeviceDisconnected``.
     """
     return scope.run_exclusive(_measure, timeout_s=timeout_s)
+
+
+# --------------------------------------------------------------------------------------------
+# Per-range gain from a reference voltage
+# --------------------------------------------------------------------------------------------
+
+GAIN_FRAMES: Final = 4
+"""Default free-run frames averaged by :func:`gain_from_reference`."""
+GAIN_MIN_DIV: Final = 1.0
+"""Smallest accepted reference deflection in divisions (2.4-6 div recommended)."""
+GAIN_MAX_DIV: Final = 7.0
+"""Largest accepted reference deflection in divisions (ground and level must both fit)."""
+GAIN_MAX_SCREEN_DIV: Final = 3.75
+"""Ground and reference level must be within +-this many divisions of the screen centre."""
+
+
+def _gain_position(deflection_div: float) -> float:
+    """Ground position that centres ground and level on screen (one decimal)."""
+    return round(-deflection_div / 2, 1)
+
+
+def gain_from_reference(
+    scope: Scope,
+    v_ref: float,
+    volts_per_div: VoltsPerDiv | str | float,
+    position_div: float | None = None,
+    frames: int = GAIN_FRAMES,
+    *,
+    timeout_s: float = 60.0,
+) -> float:
+    """Gain correction ``V_ref / V_read`` of one range from a known positive DC voltage.
+
+    Connect a stable DC source to CH1 and measure it with a multimeter (``v_ref``, volts).
+    Captures ``frames`` free-run frames (trigger off, DC, 5 ms/div: the first
+    :data:`CAL_WINDOW` samples of each frame cover 100 ms, averaging out mains hum) and converts
+    them with the scope's current calibration *without* its gain correction
+    (``range_gain`` = 1), so the result is the value to store in ``range_gain`` for this range.
+    ``position_div`` (ground position) defaults to centring ground and level on screen; the
+    level should be 2.4-6 div above ground and not at the screen edges (positions +-4).
+    Runs exclusively on the worker (acquisition paused, user settings restored afterwards).
+    Does not change the calibration. Raises ``ValueError`` (bad arguments), ``CalibrationError``
+    (saturated/noisy input or a gain outside the accepted range), ``AcquisitionTimeout``,
+    ``DeviceDisconnected``.
+    """
+    vdiv = VoltsPerDiv.parse(volts_per_div)
+    if isinstance(v_ref, bool) or not isinstance(v_ref, int | float) or not v_ref > 0:
+        raise ValueError(f"v_ref must be a positive voltage, got {v_ref!r}")
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames < 1:
+        raise ValueError(f"frames must be an int >= 1, got {frames!r}")
+    deflection = float(v_ref) / float(vdiv)
+    if not GAIN_MIN_DIV <= deflection <= GAIN_MAX_DIV:
+        raise ValueError(
+            f"v_ref {v_ref:g} V is {deflection:.2f} div at {vdiv.label}/div; use a range where it "
+            f"is {GAIN_MIN_DIV:g}..{GAIN_MAX_DIV:g} div (2.4-6 div recommended)"
+        )
+    pos = _gain_position(deflection) if position_div is None else float(position_div)
+    if abs(pos) > GAIN_MAX_SCREEN_DIV or abs(pos + deflection) > GAIN_MAX_SCREEN_DIV:
+        raise ValueError(
+            f"position {pos:g} div puts ground or the {deflection:.2f} div level outside "
+            f"+-{GAIN_MAX_SCREEN_DIV:g} div of the screen centre"
+        )
+    ch = ChannelSettings(volts_per_div=vdiv, coupling=Coupling.DC, position_div=pos)
+    settings = Settings(ch1=ch, timebase=CAL_TIMEBASE).replace(
+        trigger_mode=TriggerMode.NONE, trigger_level_v=0.0
+    )
+
+    def run(io: DeviceIO) -> float:
+        cal = dataclasses.replace(io.calibration, range_gain={})
+        data = io.live_samples(
+            frames * tables.FRAME_SIZE,
+            timebase=CAL_TIMEBASE,
+            settings=settings,
+            calibration=cal,
+        )
+        x = np.frombuffer(data, dtype=np.uint8).reshape(frames, tables.FRAME_SIZE)
+        x = x[:, :CAL_WINDOW]
+        clipped = float(np.mean((x <= tables.ADC_MIN) | (x >= tables.ADC_MAX)))
+        if clipped > MAX_CLIPPED_FRACTION:
+            raise CalibrationError(
+                f"GAIN CALIBRATION FAILED: input saturated at {vdiv.label}/div "
+                f"({clipped:.1%} of samples at 0/255); check v_ref and the range"
+            )
+        v_read = float(np.mean(units.counts_to_volts(x, ch, cal)))
+        log.info(
+            "gain %s/div: v_ref=%.4f V v_read=%.4f V (pos %g div, raw mean %.2f)",
+            vdiv.label,
+            v_ref,
+            v_read,
+            pos,
+            float(x.mean()),
+        )
+        if not v_read > 0:
+            raise CalibrationError(
+                f"GAIN CALIBRATION FAILED: read {v_read:.4f} V for a {v_ref:g} V reference; "
+                "is the source connected (positive side to the probe tip)?"
+            )
+        g = float(v_ref) / v_read
+        if not tables.RANGE_GAIN_MIN < g < tables.RANGE_GAIN_MAX:
+            raise CalibrationError(
+                f"GAIN CALIBRATION FAILED: gain {g:.4f} (read {v_read:.4f} V for {v_ref:g} V) "
+                f"outside ({tables.RANGE_GAIN_MIN:g}, {tables.RANGE_GAIN_MAX:g})"
+            )
+        return g
+
+    return scope.run_exclusive(run, timeout_s=timeout_s)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``edu09-gain``: measure a per-range gain from a DC reference and optionally save it."""
+    parser = argparse.ArgumentParser(
+        prog="edu09-gain",
+        description=(
+            "Measure the gain correction V_ref / V_read of one V/div range from a known positive "
+            "DC voltage on CH1 (measure it with a multimeter). Close the GUI / MCP server first."
+        ),
+    )
+    parser.add_argument("--vref", type=float, required=True, help="reference voltage (V)")
+    parser.add_argument("--vdiv", required=True, help="range, e.g. 0.5 or 500mV")
+    parser.add_argument("--position", type=float, default=None, help="ground position (div)")
+    parser.add_argument("--frames", type=int, default=GAIN_FRAMES, help="frames to average")
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="store the gain in range_gain of the calibration file (old file backed up)",
+    )
+    parser.add_argument("--calibration", default=None, help="calibration file (default: user's)")
+    args = parser.parse_args(argv)
+    try:
+        vdiv = VoltsPerDiv.parse(args.vdiv)
+    except ValueError as exc:
+        parser.error(str(exc))
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    try:
+        with Scope.open(calibration=args.calibration) as scope:
+            g = gain_from_reference(scope, args.vref, vdiv, args.position, args.frames)
+            print(f"range_gain[{float(vdiv):g}] = {g:.4f}")
+            if args.save:
+                cal = scope.calibration.with_range_gain({float(vdiv): round(g, 4)})
+                backup = scope.set_calibration(cal, save=True, path=args.calibration)
+                print(f"saved ({'backup ' + str(backup) if backup else 'no previous file'})")
+    except (ValueError, Edu09Error) as exc:
+        print(f"edu09-gain: {exc}", file=sys.stderr)
+        return 1
+    return 0
