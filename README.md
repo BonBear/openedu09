@@ -173,7 +173,7 @@ Alpha (0.1.0, unreleased). Known limitations:
   and corrects both per unit (positive/negative gain and a piecewise negative correction). The
   wizard has been run on hardware (with and without trimming RV1; verify within ~0.6 %); the
   purpose of the board trimmer RV1 comes from the vendor manual.
-- Windows 11 has been tested with hardware (Python 3.12): all hardware tests, GUI, MCP bridge and
+- Windows has been tested with hardware (Python 3.12): all hardware tests, GUI, MCP bridge and
   owner lock pass. Use Python 3.12/3.13 (no `hidapi` wheels for 3.15 yet). macOS is untested.
 - A one-off readout timeout at GUI startup was seen once early on and has not been reproduced
   since; run with `--record FILE` and report it if it happens.
