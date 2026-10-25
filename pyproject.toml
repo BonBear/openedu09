@@ -18,7 +18,9 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: System :: Hardware :: Universal Serial Bus (USB)",
 ]
@@ -27,6 +29,12 @@ dependencies = [
     "hidapi>=0.14",
     "numpy>=1.26",
     "mcp>=2.3,<3",
+    # Imported directly by edu09.mcp_server (not only transitively via mcp); bounds follow mcp 2.3.
+    "mcp-types>=2.3,<3",
+    "pydantic>=2.12",
+    "anyio>=4.10",
+    "httpx2>=2.10",
+    "uvicorn>=0.31.1",
     "platformdirs>=4",
     "filelock>=3.12",
 ]
@@ -39,8 +47,9 @@ gui = [
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",
-    "ruff>=0.5",
-    "mypy>=1.10",
+    "ruff~=0.17.0",
+    "mypy~=2.4.0",
+    "build>=1.2",
 ]
 
 [project.urls]
@@ -61,6 +70,17 @@ path = "src/edu09/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/edu09"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/packaging",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -75,10 +95,10 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests", "tools"]
+src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF100"]
 
 [tool.ruff.lint.isort]
 known-third-party = ["mcp"]
@@ -101,5 +121,5 @@ module = [
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["hid", "hidraw", "pyqtgraph", "pyqtgraph.*"]
+module = ["hid", "hidraw", "pyqtgraph.*"]
 ignore_missing_imports = true

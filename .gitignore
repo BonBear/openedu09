@@ -1,7 +1,6 @@
 # Secrets — never commit
 .env
 .env.*
-!.env.example
 .secrets/
 *.pem
 *.key
@@ -14,9 +13,12 @@ captures/
 __pycache__/
 *.egg-info/
 .venv/
+venv/
+.python-version
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
 dist/
 build/
 
@@ -34,6 +36,16 @@ build/
 *.whl
 .eggs/
 .coverage
+.coverage.*
 htmlcov/
 .idea/
 .vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# Local runtime output from the CLI tools (calibration files and their backups, CSV exports)
+*.bak.json
+/calibration*.json
+/edu09-*.csv
+/edu09_*.csv

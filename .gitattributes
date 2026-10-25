@@ -1,4 +1,11 @@
-* text=auto
-*.jsonl text eol=lf
+# Normalise line endings: LF in the repository and in every checkout (also on Windows).
+* text=auto eol=lf
+
+# Formats where a stray CRLF would break something (udev rules, shell, replayed USB captures).
+*.rules text eol=lf
 *.sh text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+
+# Binary
 *.png binary
