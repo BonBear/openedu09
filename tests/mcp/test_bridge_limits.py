@@ -1,4 +1,4 @@
-"""Wave-6 review fixes for the bridge and the MCP CLI:
+"""Review fixes for the bridge and the MCP CLI:
 
 * ``owner.json`` gone -> ``OwnerGone`` (the old URL is never reused);
 * forwarded tool calls have an overall time limit; oversized JSON responses are refused;
@@ -134,7 +134,7 @@ class _HugeJson(BaseHTTPRequestHandler):
     total = 16 * 1024 * 1024
     sent: list[int] = []
 
-    def do_POST(self) -> None:  # noqa: N802 - http.server API
+    def do_POST(self) -> None:
         n = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(n)
         self.send_response(200)

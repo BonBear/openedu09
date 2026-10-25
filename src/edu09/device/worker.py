@@ -414,7 +414,7 @@ class _Waiter:
 
 
 # --------------------------------------------------------------------------------------------
-# Raw device access for exclusive operations (calibration hook, T9)
+# Raw device access for exclusive operations (calibration, calibration wizard)
 # --------------------------------------------------------------------------------------------
 class DeviceIO:
     """Raw device access handed to :meth:`AcquisitionWorker.exclusive` callbacks.
@@ -469,18 +469,6 @@ class DeviceIO:
     def drain(self, timeout_s: float = DRAIN_READ_TIMEOUT_S) -> int:
         """Discard pending IN reports; returns how many were discarded."""
         return self._check()._drain(timeout_s)
-
-    def send_config(self, cfg: HwConfig) -> None:
-        self._check()._send_config(cfg, force=True)
-
-    def apply_settings(
-        self, settings: Settings, calibration: units.Calibration | None = None
-    ) -> HwConfig:
-        """Send the config for ``settings`` (does not change the worker's stored settings)."""
-        w = self._check()
-        cfg = units.settings_to_hwconfig(settings, calibration or w._cal)
-        w._send_config(cfg, force=True)
-        return cfg
 
     def live_samples(
         self,

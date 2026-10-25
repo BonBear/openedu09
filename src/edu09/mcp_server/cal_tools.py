@@ -13,7 +13,6 @@ This module deliberately has no ``from __future__ import annotations``: the SDK 
 input schemas from the runtime annotations.
 """
 
-import importlib
 import itertools
 import json
 import logging
@@ -31,7 +30,7 @@ from edu09.errors import CalibrationError, UnsafeOperation
 if TYPE_CHECKING:
     from edu09.calwizard import CalibrationSession, Plan, Source
     from edu09.device.scope import Scope
-    from edu09.mcp_server.server import FastMCP, ServerOptions
+    from edu09.mcp_server.server import FastMCP
 
 __all__ = [
     "CAL_TOOL_NAMES",
@@ -45,8 +44,6 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-CALWIZARD_MODULE: Final = "edu09.calwizard"
-SIMREF_MODULE: Final = "edu09.calwizard.simref"
 IDLE_TIMEOUT_S: Final = 30 * 60.0
 MAX_RESPONSE_BYTES: Final = 8 * 1024
 MAX_SOURCES: Final = 8
@@ -74,19 +71,19 @@ class NoSession(CalibrationError):
 
 
 def _cw() -> Any:
-    return importlib.import_module(CALWIZARD_MODULE)
+    """The wizard engine, imported on first use (only servers with ``--allow-calibration``)."""
+    import edu09.calwizard
+
+    return edu09.calwizard
 
 
 def _sim_reference(scope: "Scope") -> Any:
     """``SimReference.for_scope(scope)`` on a simulated scope, else None."""
     if scope.status.transport_kind != "sim":
         return None
-    try:
-        mod: Any = importlib.import_module(SIMREF_MODULE)
-    except ImportError:
-        log.warning("simulator reference unavailable; readings must be typed")
-        return None
-    return mod.SimReference.for_scope(scope)
+    from edu09.calwizard.simref import SimReference
+
+    return SimReference.for_scope(scope)
 
 
 # --------------------------------------------------------------------------------------------
@@ -443,7 +440,6 @@ TrimmerArg = Annotated[
 def register_calibration_tools(
     mcp: "FastMCP",
     scope: "Scope",
-    opts: "ServerOptions",
     *,
     ok: Callable[[Any], CallToolResult],
     tool_errors: Callable[[], Any],

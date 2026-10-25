@@ -1,4 +1,4 @@
-"""OwnerLock: inter-process device ownership + owner discovery (architecture.md 3.4, T7)."""
+"""OwnerLock: inter-process device ownership + owner discovery (architecture.md 3.4)."""
 
 from __future__ import annotations
 

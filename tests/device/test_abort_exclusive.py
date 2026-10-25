@@ -7,10 +7,8 @@ an aborted calibration never saves. Simulator only (never the real device).
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
-import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -46,7 +44,7 @@ def rt_scope(tmp_path: Path) -> Iterator[Scope]:
 
 
 def _spy_measure(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, list[Any]]:
-    """Wrap the T9 procedure: ``entered`` is set when it starts on the worker thread."""
+    """Wrap the calibration procedure: ``entered`` is set when it starts on the worker thread."""
     entered = threading.Event()
     outcome: list[Any] = []
     orig = calmod._measure
@@ -158,9 +156,7 @@ def test_abort_after_measurement_never_saves(
         assert scope.abort_exclusive() is True  # the calibration's abort event is registered
         return units.Calibration(source="measured")
 
-    mod = types.ModuleType("edu09.device.calibration")
-    mod.measure_calibration = measure_calibration  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "edu09.device.calibration", mod)
+    monkeypatch.setattr(calmod, "measure_calibration", measure_calibration)
     with pytest.raises(JobAborted):
         sim_scope.calibrate(confirm=True, input_disconnected=True, path=tmp_path / "c.json")
     assert not (tmp_path / "c.json").exists()

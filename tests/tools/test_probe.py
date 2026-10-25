@@ -415,11 +415,11 @@ def test_failed_write_is_logged_as_comment_and_log_stays_replayable(tmp_path):
     assert load_records(cap) == []
 
 
-def test_shim_runs_help():
+def test_module_runs_help():
     import subprocess
     import sys
-    from pathlib import Path
 
-    shim = Path(__file__).parents[2] / "tools" / "probe.py"
-    r = subprocess.run([sys.executable, str(shim), "--help"], capture_output=True, text=True)
+    r = subprocess.run(
+        [sys.executable, "-m", "edu09.probe", "--help"], capture_output=True, text=True
+    )
     assert r.returncode == 0 and "edu09-probe" in r.stdout

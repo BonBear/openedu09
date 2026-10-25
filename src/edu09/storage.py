@@ -1,4 +1,4 @@
-"""Persistence helpers: calibration JSON, vendor ``EDU09.ini`` import, CSV export, waveform store.
+"""Persistence helpers: calibration JSON, CSV export, waveform store.
 
 Nothing here talks to the device and no threads are started. ``WaveformStore`` is thread-safe
 (one ``threading.Lock``) because the worker callback stores waveforms while MCP/GUI threads read.
@@ -7,7 +7,6 @@ Nothing here talks to the device and no threads are started. ``WaveformStore`` i
 from __future__ import annotations
 
 import builtins
-import configparser
 import contextlib
 import csv
 import io
@@ -25,7 +24,7 @@ import platformdirs
 
 from .errors import CalibrationError, Edu09Error
 from .model import Waveform
-from .units import Calibration, GndFit
+from .units import Calibration
 
 APP_NAME = "edu09"
 CALIBRATION_FILENAME = "calibration.json"
@@ -35,7 +34,6 @@ CALIBRATION_FILE_VERSION_V2 = 2
 """File version written when ``range_gain_neg`` / ``neg_nonlinearity`` / ``meta`` are present."""
 CALIBRATION_FILE_VERSIONS = (CALIBRATION_FILE_VERSION, CALIBRATION_FILE_VERSION_V2)
 DEFAULT_STORE_CAPACITY = 32  # architecture.md section 6: "store keeps the last 32"
-INI_SECTION = "Calibration"  # protocol.md 5.4 step 5
 CSV_COLUMNS = ("t_s", "volts", "raw")
 
 
@@ -131,46 +129,6 @@ def backup_calibration(path: str | os.PathLike[str] | None = None) -> Path | Non
     backup = target.with_name(f"{target.stem}.{stamp}.bak{target.suffix}")
     _atomic_write_text(backup, target.read_text(encoding="utf-8"))
     return backup
-
-
-# --------------------------------------------------------------------------------------------
-# Vendor EDU09.ini import (read-only)
-# --------------------------------------------------------------------------------------------
-
-
-def import_vendor_ini(path: str | os.PathLike[str]) -> Calibration:
-    """Convert the vendor ``EDU09.ini`` ``[Calibration]`` section into a ``Calibration``.
-
-    Known keys (protocol.md 5.3): ``Ch1_pos0..2`` (DAC) and ``Ch1_ad0..2`` (AD measured with
-    ``ReadBytes`` = ``255 - mean``), fitted with ``GndFit.from_points``. The key names for
-    ``base_ofs`` / ``range_corr`` are not known, so those keep their defaults. The file is
-    never modified. Raises ``CalibrationError`` when missing or malformed.
-    """
-    src = Path(path)
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    try:
-        # utf-8-sig: tolerate a BOM (Notepad re-save); the vendor app writes ANSI/ASCII.
-        with src.open(encoding="utf-8-sig", errors="replace") as fh:
-            parser.read_file(fh)
-    except OSError as exc:
-        raise CalibrationError(f"cannot read {src}: {exc}") from exc
-    except configparser.Error as exc:
-        raise CalibrationError(f"{src} is not a valid INI file: {exc}") from exc
-    if not parser.has_section(INI_SECTION):
-        raise CalibrationError(f"{src} has no [{INI_SECTION}] section")
-    sec = parser[INI_SECTION]
-    points: list[tuple[float, float]] = []
-    for i in range(3):
-        try:
-            # Delphi FloatToStr uses the locale decimal separator (e.g. "127,5" on sv/fi).
-            pos = float(sec[f"Ch1_pos{i}"].strip().replace(",", "."))
-            ad = float(sec[f"Ch1_ad{i}"].strip().replace(",", "."))
-        except KeyError as exc:
-            raise CalibrationError(f"{src}: missing key {exc.args[0]} in [{INI_SECTION}]") from None
-        except ValueError as exc:
-            raise CalibrationError(f"{src}: non-numeric calibration value: {exc}") from None
-        points.append((pos, ad))
-    return Calibration(gnd_fit=GndFit.from_points(points), source="ini-import")
 
 
 # --------------------------------------------------------------------------------------------
@@ -328,7 +286,6 @@ __all__ = [
     "default_data_dir",
     "default_export_dir",
     "export_csv",
-    "import_vendor_ini",
     "load_calibration",
     "resolve_export_path",
     "save_calibration",

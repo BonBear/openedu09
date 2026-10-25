@@ -1,4 +1,4 @@
-"""AcquisitionWorker: sequencing, trigger modes, ETS, errors, unplug/reconnect, shutdown (T7).
+"""AcquisitionWorker: sequencing, trigger modes, ETS, errors, unplug/reconnect, shutdown.
 
 Driven by ``SimTransport.virtual`` (VirtualClock: deadlines in simulated time, no real sleeps)
 and by scripted replays of the H1 hardware captures in ``tests/fixtures/h1``.

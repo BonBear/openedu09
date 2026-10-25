@@ -14,7 +14,6 @@ any future resolves, so ``store.get("latest")`` is consistent with ``acquire()``
 from __future__ import annotations
 
 import concurrent.futures
-import importlib
 import logging
 import os
 import threading
@@ -45,7 +44,7 @@ from edu09.model import Settings, Timebase, TriggerMode, Waveform
 from edu09.protocol import tables
 from edu09.transport.base import Transport
 
-__all__ = ["Scope", "ScopeStatus"]
+__all__ = ["UNCALIBRATED_WARNING", "Scope", "ScopeStatus", "is_uncalibrated"]
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +54,18 @@ COMMAND_TIMEOUT_S: Final = 10.0
 """Upper bound for waiting on non-acquisition commands (configure, run, stop, ...)."""
 QUEUE_SLACK_S: Final = 10.0
 """Extra time ``acquire`` allows for commands queued ahead of it."""
-CALIBRATION_MODULE: Final = "edu09.device.calibration"
+UNCALIBRATED_WARNING: Final = (
+    "uncalibrated: typical offsets, no gain correction; run the calibration wizard "
+    "(edu09-calibrate or Tools > Calibrate)"
+)
+"""Status / log / MCP warning for a hardware scope without a calibration file."""
+
+
+def is_uncalibrated(transport_kind: str, calibration: units.Calibration) -> bool:
+    """True for a hardware scope running on a fallback calibration (no calibration file:
+    ``Calibration.typical()``, or the idealised ``Calibration()``). Simulators and replays are
+    never "uncalibrated" (their front end follows the model)."""
+    return transport_kind == "hid" and calibration.source in ("default", "typical")
 
 
 @dataclass(frozen=True)
@@ -74,10 +84,16 @@ class ScopeStatus:
     transport_kind: str
     simulated: bool
     owner: OwnerInfo | None
+    calibrated: bool = True
+    """False for hardware without a calibration file (see :func:`is_uncalibrated`)."""
 
     @property
     def last_waveform_id(self) -> str | None:
         return f"w{self.last_seq}" if self.last_seq > 0 else None
+
+    @property
+    def calibration_warning(self) -> str | None:
+        return None if self.calibrated else UNCALIBRATED_WARNING
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +105,8 @@ class ScopeStatus:
             "last_waveform_id": self.last_waveform_id,
             "calibration_source": self.calibration_source,
             "calibration_id": self.calibration_id,
+            "calibrated": self.calibrated,
+            "calibration_warning": self.calibration_warning,
             "transport": self.transport_kind,
             "simulated": self.simulated,
             "owner": (
@@ -176,8 +194,9 @@ class Scope:
         is a ``Calibration``, a path to a calibration JSON file, or None: the default file for
         hardware transports (``storage.load_calibration``), the uncalibrated default for
         sim/replay. Hardware without a (usable) calibration file gets
-        ``Calibration.typical()`` (HW-measured typical values; the ``Calibration()`` model's
-        DAC slope of 2 is about twice the real one). Hardware transports take the
+        ``Calibration.typical()`` (HW-measured typical offsets, no gain correction; the
+        ``Calibration()`` model's DAC slope of 2 is about twice the real one); it is reported as
+        uncalibrated (``ScopeStatus.calibrated``, a logged warning). Hardware transports take the
         inter-process :class:`OwnerLock` first (``use_lock=None`` = auto;
         ``DeviceBusy(owner=...)`` if another process owns it).
         A ``SimTransport`` on a ``VirtualClock`` drives the deadlines in simulated time unless
@@ -212,6 +231,9 @@ class Scope:
                 cal = units.Calibration.typical()
         else:
             cal = units.Calibration()
+        if is_uncalibrated(transport.info.kind, cal):
+            where = "no calibration file" if cal_path is None else f"no usable {cal_path}"
+            log.warning("%s: %s", where, UNCALIBRATED_WARNING)
         if clock is None:
             clock = _virtual_clock_of(transport)
         lock: OwnerLock | None = None
@@ -313,6 +335,7 @@ class Scope:
             transport_kind=kind,
             simulated=kind == "sim",
             owner=self._owner_lock.info() if self._owner_lock is not None else None,
+            calibrated=not is_uncalibrated(kind, cal),
         )
 
     @property
@@ -498,7 +521,7 @@ class Scope:
         """Mean raw ADC count (never volts) of ``n`` samples from free-run frame capture(s).
 
         Trigger off, current V/div/offset, ``timebase`` (default 200 us/div, realtime only);
-        the user's settings are restored afterwards. Used by calibration (T9). The original's
+        the user's settings are restored afterwards. Used by calibration. The original's
         ``0x0D`` live reports are status reports on firmware 1.01 (H2) and are never used.
         """
         if n < 1:
@@ -578,8 +601,8 @@ class Scope:
     ) -> units.Calibration:
         """Opt-in calibration (architecture.md 5). Both flags must be True.
 
-        The procedure itself lives in ``edu09.device.calibration`` (task T9), which must provide
-        ``measure_calibration(scope: Scope) -> Calibration``.
+        The procedure is :func:`edu09.device.calibration.measure_calibration` (offsets and
+        ground fit; the calibration wizard also measures the per-range gains).
 
         Abort: setting ``abort_event``, :meth:`abort_exclusive` or :meth:`close` (from another
         thread) ends the procedure at its next device call with ``JobAborted``; an aborted
@@ -593,12 +616,8 @@ class Scope:
             )
         if save and path is None and self._calibration_path is None:
             raise ValueError("this scope has no calibration file; pass path= or save=False")
-        try:
-            mod: Any = importlib.import_module(CALIBRATION_MODULE)
-        except ModuleNotFoundError as exc:
-            if exc.name != CALIBRATION_MODULE:
-                raise
-            raise NotImplementedError("the calibration procedure is not implemented yet") from exc
+        from edu09.device import calibration as calmod  # (that module imports this one)
+
         abort = abort_event if abort_event is not None else threading.Event()
         with self._abort_events_lock:
             self._abort_events.add(abort)
@@ -609,7 +628,7 @@ class Scope:
         try:
             if abort.is_set():
                 raise JobAborted("calibration aborted before it started")
-            cal = mod.measure_calibration(self)
+            cal = calmod.measure_calibration(self)
             if not isinstance(cal, units.Calibration):
                 raise CalibrationError("calibration procedure returned no Calibration")
             if abort.is_set() or self._closed:

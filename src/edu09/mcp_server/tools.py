@@ -22,7 +22,6 @@ input schemas from the runtime annotations.
 """
 
 import contextlib
-import importlib
 import json
 import logging
 import math
@@ -116,7 +115,6 @@ SPECTRUM_DB_FLOOR_RANGE: Final = (-200.0, 0.0)
 DESPIKE_IGNORED_WARNING: Final = (
     "despike ignored: only for ETS timebases (50/20/10 us/div); it corrupts realtime frames"
 )
-AUTOSET_MODULE: Final = "edu09.device.autoset"
 
 # --------------------------------------------------------------------------------------------
 # payload helpers
@@ -248,8 +246,6 @@ _HINTS: Final[dict[type[BaseException], str]] = {
 def _error_class(exc: BaseException) -> str:
     if isinstance(exc, storage.WaveformNotFound):
         return "NotFound"
-    if isinstance(exc, NotImplementedError):
-        return "NotImplemented"
     return type(exc).__name__
 
 
@@ -469,6 +465,11 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
         d["stored_waveforms"] = len(scope.store)
         return d
 
+    def calibration_warnings() -> list[str]:
+        """``[ScopeStatus.calibration_warning]`` for an uncalibrated hardware scope, else []."""
+        w = scope.status.calibration_warning
+        return [w] if w is not None else []
+
     def get_wf(waveform_id: str) -> Waveform:
         if not isinstance(waveform_id, str) or not waveform_id.strip():
             raise ValueError("waveform_id must be 'latest' or an id such as 'w12'")
@@ -478,7 +479,8 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
     @mcp.tool(
         description="Scope status: connection, firmware, state (idle|running|armed|disconnected), "
         "current settings (flat, same keys as configure), last_waveform_id, calibration source, "
-        "simulated flag and the device owner process."
+        "calibrated (false: no calibration file, a warning says how to calibrate), simulated "
+        "flag and the device owner process."
     )
     def get_status() -> CallToolResult:
         with _tool_errors():
@@ -569,7 +571,7 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
                     "duration_s": wf.duration_s,
                     "stats": analysis.stats_waveform(wf),
                     "points": _points(wf, 0, wf.n, mp, "minmax"),
-                    "warnings": _waveform_warnings(wf),
+                    "warnings": _waveform_warnings(wf) + calibration_warnings(),
                 }
             )
 
@@ -788,7 +790,7 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
         with _resource_errors():
             return json.dumps(_full_waveform(get_wf(waveform_id)), separators=(",", ":"))
 
-    # -- T9 features (registered last) ----------------------------------------------------
+    # -- auto-set and calibration (registered last) -----------------------------------------
     @mcp.tool(
         description="Automatic setup for an unknown signal (100 mV..30 V, > 50 Hz): sets DC "
         "coupling, trigger auto, the smallest unclipped V/div, a timebase showing 4-20 periods "
@@ -799,13 +801,9 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
     ) -> CallToolResult:
         with _tool_errors():
             timeout = _check_range("timeout_s", timeout_s, *AUTOSET_TIMEOUT_RANGE)
-            try:
-                mod: Any = importlib.import_module(AUTOSET_MODULE)
-            except ModuleNotFoundError as exc:
-                if exc.name != AUTOSET_MODULE:
-                    raise
-                raise NotImplementedError("auto_set is not available in this build") from exc
-            res = mod.auto_set(scope, timeout_s=timeout)
+            from edu09.device import autoset
+
+            res = autoset.auto_set(scope, timeout_s=timeout)
             wf = getattr(res, "waveform", None)
             return _ok(
                 {
@@ -850,4 +848,4 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
 
         from edu09.mcp_server.cal_tools import register_calibration_tools
 
-        register_calibration_tools(mcp, scope, opts, ok=_ok, tool_errors=_tool_errors)
+        register_calibration_tools(mcp, scope, ok=_ok, tool_errors=_tool_errors)

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import sys
 from collections.abc import Iterator
 from typing import Any
 
@@ -29,9 +28,7 @@ WAIT_MS = 10_000
 
 @pytest.fixture
 def fake_mcp(monkeypatch: pytest.MonkeyPatch) -> FakeMcp:
-    fake = FakeMcp()
-    monkeypatch.setitem(sys.modules, "edu09.mcp_server.server", fake.module())
-    return fake
+    return FakeMcp().install(monkeypatch)
 
 
 def _open(transport: SimTransport) -> Scope:

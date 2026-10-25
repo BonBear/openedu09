@@ -5,7 +5,8 @@
 * The worker waits ``worker.OFFSET_SETTLE_S`` (20 ms) after a ``0x0E`` that changed the offset or
   gain byte before ``0x0B``; unchanged configs add no delay.
 * Calibration retries a too-noisy *first* reading once after an extra settle.
-* Hardware without a calibration file gets ``Calibration.typical()``.
+* Hardware without a calibration file gets ``Calibration.typical()`` (typical offsets, no gain
+  correction) and is reported as uncalibrated.
 """
 
 from __future__ import annotations
@@ -274,22 +275,16 @@ def test_typical_calibration_values() -> None:
     assert cal.range_corr == {1.0: -1, 0.1: -1}
     assert cal.gnd_fit == units.GndFit(1.03, -9.8)
     assert units.Calibration.from_dict(cal.to_dict()) == cal
-    assert cal.range_gain == {
-        0.1: 0.987,
-        0.2: 0.975,
-        0.5: 0.974,
-        1.0: 0.996,
-        2.0: 0.981,
-        5.0: 0.979,
-    }
-    # ground near mid-scale; one division of position ~32 DAC steps (not 16 as with slope 2):
-    # 32 / 0.981 = 32.6 counts per true division at 2 V/div, / 1.03 counts per DAC step
+    assert cal.range_gain == {} and cal.range_gain_neg == {} and cal.neg_nonlinearity == {}
+    # ground near mid-scale; one division of position ~31 DAC steps (not 16 as with slope 2):
+    # 32 counts per division / 1.03 counts per DAC step; with a gain of 0.981 (one unit's 2 V/div)
+    # it is 32 / 0.981 = 32.6 counts per true division -> 32 steps
     ch = ChannelSettings(VoltsPerDiv.V2)
     assert units.gnd_counts(ch, cal) == pytest.approx(126.8, abs=0.1)
     up = ChannelSettings(VoltsPerDiv.V2, position_div=1.0)
-    assert cal.base_ofs - units.offset_dac(up, cal) == 32
-    no_gain = replace(cal, range_gain={})
-    assert no_gain.base_ofs - units.offset_dac(up, no_gain) == 31
+    assert cal.base_ofs - units.offset_dac(up, cal) == 31
+    with_gain = replace(cal, range_gain=dict(tables.TYPICAL_RANGE_GAIN))
+    assert with_gain.base_ofs - units.offset_dac(up, with_gain) == 32
     # the uncalibrated model is unchanged (sim and fixtures depend on it)
     assert units.Calibration().gnd_fit == units.GndFit(2.0, -128.0)
     assert units.Calibration().base_ofs == tables.OFFSET_DAC_DEFAULT
@@ -314,23 +309,43 @@ class _HidLike:
 
 
 def test_hardware_without_calibration_file_uses_typical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     from edu09 import storage
+    from edu09.device.scope import UNCALIBRATED_WARNING
+
+    def uncalibrated(sc: Scope) -> bool:
+        st = sc.status
+        d = st.to_dict()
+        assert (
+            d["calibrated"] is st.calibrated and d["calibration_warning"] == st.calibration_warning
+        )
+        return not st.calibrated and st.calibration_warning == UNCALIBRATED_WARNING
 
     monkeypatch.setattr(storage, "default_calibration_path", lambda: tmp_path / "none.json")
+    caplog.set_level(logging.WARNING, logger="edu09.device.scope")
     with Scope.open(_HidLike(), lock_dir=tmp_path) as sc:  # type: ignore[arg-type]
         assert sc.calibration == units.Calibration.typical()
+        assert sc.calibration.range_gain == {}  # gain-neutral: no other unit's gains
         assert sc.status.calibration_source == "typical"
+        assert uncalibrated(sc)
+    assert [r.getMessage() for r in caplog.records].count(
+        f"no usable {tmp_path / 'none.json'}: {UNCALIBRATED_WARNING}"
+    ) == 1
     with Scope.open(  # type: ignore[arg-type]
         _HidLike(), lock_dir=tmp_path, calibration=tmp_path / "missing.json"
     ) as sc:
         assert sc.status.calibration_source == "typical"
+        assert uncalibrated(sc)
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(storage, "default_calibration_path", lambda: bad)
     with Scope.open(_HidLike(), lock_dir=tmp_path) as sc:  # type: ignore[arg-type]
         assert sc.status.calibration_source == "typical"
+        assert uncalibrated(sc)
+        # installing a measured calibration (the wizard's save) clears it
+        sc.set_calibration(replace(units.Calibration.typical(), source="measured"), save=False)
+        assert sc.status.calibrated and sc.status.calibration_warning is None
 
 
 def test_hardware_with_calibration_file_uses_it(tmp_path: Path) -> None:
@@ -341,9 +356,11 @@ def test_hardware_with_calibration_file_uses_it(tmp_path: Path) -> None:
     storage.save_calibration(measured, path)
     with Scope.open(_HidLike(), lock_dir=tmp_path, calibration=path) as sc:  # type: ignore[arg-type]
         assert sc.calibration == measured
+        assert sc.status.calibrated and sc.status.calibration_warning is None
 
 
 def test_sim_keeps_the_default_model() -> None:
     with Scope.open(SimTransport.virtual()) as sc:
         assert sc.status.calibration_source == "default"
+        assert sc.status.calibrated  # the simulator's front end follows the model
         assert sc.settings == Settings()

@@ -202,7 +202,7 @@ def test_pinned_calibration_id_of_user_file() -> None:
     cal = Calibration.from_dict(USER_FILE_CAL)
     assert cal.calibration_id == "measured:c9c4b95f56"  # same as before v2 (ec50d15)
     assert Calibration().calibration_id == "default:b778303fc6"
-    assert TYP.calibration_id == "typical:29c1bad175"
+    assert TYP.calibration_id == "typical:cb51830b6a"  # no gains (was 29c1bad175 with them)
     assert cal.to_dict() == {**USER_FILE_CAL, "range_gain": {}}
 
 

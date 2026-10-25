@@ -1,4 +1,4 @@
-"""Review (T7 concurrency audit): races, shutdown, thread ownership and stale-report edge cases.
+"""Review (concurrency audit): races, shutdown, thread ownership and stale-report edge cases.
 
 Everything runs on ``SimTransport.virtual`` (never the real device).
 """

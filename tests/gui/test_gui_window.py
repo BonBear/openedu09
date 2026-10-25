@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import re
-import sys
 import threading
-import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -181,28 +179,15 @@ def test_mcp_toggle_starts_and_stops_server(qtbot: Any, fake_mcp: FakeMcp, vscop
         win.shutdown()
 
 
-def test_mcp_import_failure_disables_toggle(
-    qtbot: Any, fake_mcp: FakeMcp, vscope: Scope, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_mcp_start_failure_unchecks_toggle(qtbot: Any, fake_mcp: FakeMcp, vscope: Scope) -> None:
+    fake_mcp.error = OSError("address already in use")
     win = make_window(qtbot, vscope)
     try:
-        monkeypatch.setitem(sys.modules, "edu09.mcp_server.server", None)  # import -> ImportError
         win.mcp_action.setChecked(True)
-        qtbot.waitUntil(lambda: not win.mcp_action.isEnabled(), timeout=WAIT_MS)
-        assert not win.mcp_action.isChecked()
-        assert "unavailable" in win.mcp_action.toolTip()
-    finally:
-        win.shutdown()
-
-
-def test_mcp_unavailable_at_startup(
-    qtbot: Any, vscope: Scope, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setitem(sys.modules, "edu09.mcp_server.server", None)
-    win = make_window(qtbot, vscope)
-    try:
-        assert not win.mcp_action.isEnabled()
-        assert win.mcp_action.toolTip()
+        qtbot.waitUntil(lambda: not win.mcp_action.isChecked(), timeout=WAIT_MS)
+        assert win.mcp_action.isEnabled()  # can be retried
+        assert win.mcp_url is None
+        assert "MCP server failed to start: OSError" in win.log_view.toPlainText()
     finally:
         win.shutdown()
 
@@ -234,7 +219,7 @@ def test_export_csv(
     assert window.export_csv() is None
 
 
-# -- auto-set / calibration (T9 contracts, faked) ----------------------------------------------
+# -- auto-set (faked) ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -254,9 +239,9 @@ def test_autoset_runs_in_background(
         s = scope.configure(volts_per_div=1.0, timebase="500us")
         return FakeAutoSetResult(s, ["picked 1 V/div: Vpp 2 V", "picked 500 us/div"])
 
-    mod = types.ModuleType("edu09.device.autoset")
-    mod.auto_set = auto_set  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "edu09.device.autoset", mod)
+    from edu09.device import autoset
+
+    monkeypatch.setattr(autoset, "auto_set", auto_set)
     window.auto_set()
     assert not window.controls.autoset_button.isEnabled()  # busy
     qtbot.waitUntil(lambda: window.last_autoset is not None, timeout=WAIT_MS)
@@ -268,27 +253,6 @@ def test_autoset_runs_in_background(
         lambda: window.controls.timebase.currentData() == Timebase.US500.value, timeout=WAIT_MS
     )
     assert window.controls.vdiv.currentData() == VoltsPerDiv.V1.value
-
-
-def test_calibrate_needs_confirmation(
-    qtbot: Any, window: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(window.scope, "calibrate", lambda **kw: calls.append(kw) or object())
-    monkeypatch.setattr(window, "confirm_calibration", lambda: False)
-    assert window.calibrate() is False
-    drain(qtbot, window)
-    assert calls == []
-    monkeypatch.setattr(window, "confirm_calibration", lambda: True)
-    assert window.calibrate() is True
-    qtbot.waitUntil(lambda: "Calibration done" in window.log_view.toPlainText(), timeout=WAIT_MS)
-    assert calls == [{"confirm": True, "input_disconnected": True, "save": True}]
-
-
-def test_calibration_dialog_text_asks_to_disconnect() -> None:
-    from edu09.gui.main_window import CALIBRATION_TEXT
-
-    assert "DISCONNECT" in CALIBRATION_TEXT and "input" in CALIBRATION_TEXT.lower()
 
 
 def test_despike_option_applies_to_ets_frames_only(qtbot: Any, window: Any) -> None:
@@ -308,3 +272,58 @@ def test_despike_option_applies_to_ets_frames_only(qtbot: Any, window: Any) -> N
     from edu09 import analysis
 
     assert np.array_equal(y2, analysis.despike(wf.volts))
+
+
+# -- uncalibrated hardware -----------------------------------------------------------------------
+
+
+class _HidLike:
+    """A SimTransport that claims to be hardware (no calibration file -> uncalibrated)."""
+
+    def __init__(self) -> None:
+        from edu09.transport.base import TransportInfo
+
+        self.inner = SimTransport.virtual(seed=0)
+        self.info = TransportInfo(kind="hid", path="/dev/fake-edu09")
+
+    def open(self) -> None:
+        self.inner.open()
+
+    def close(self) -> None:
+        self.inner.close()
+
+    def write(self, payload: bytes) -> None:
+        self.inner.write(payload)
+
+    def read(self, timeout_s: float) -> bytes | None:
+        return self.inner.read(timeout_s)
+
+
+def test_uncalibrated_hardware_shows_persistent_status_label(qtbot: Any, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from edu09.units import Calibration
+
+    scope = Scope.open(_HidLike(), lock_dir=tmp_path)  # type: ignore[arg-type]
+    try:
+        win = make_window(qtbot, scope)
+        try:
+            assert "Uncalibrated" in win.cal_label.text() and not win.cal_label.isHidden()
+            assert "edu09-calibrate" in win.cal_label.toolTip()
+            assert "Warning: uncalibrated" in win.log_view.toPlainText()
+            win.notify("something else")  # temporary messages do not replace it
+            assert "Uncalibrated" in win.cal_label.text()
+            # a calibration saved by the wizard clears it when the wizard closes
+            wiz = win.open_calibration_wizard()
+            scope.set_calibration(replace(Calibration.typical(), source="measured"))
+            wiz.reject()
+            qtbot.waitUntil(lambda: win.busy_job is None, timeout=WAIT_MS)
+            assert win.cal_label.text() == "" and win.cal_label.isHidden()
+        finally:
+            win.shutdown()
+    finally:
+        scope.close()
+
+
+def test_simulator_is_not_shown_uncalibrated(window: Any) -> None:
+    assert window.cal_label.text() == "" and window.cal_label.isHidden()

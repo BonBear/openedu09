@@ -105,7 +105,7 @@ def _post(url: str, headers: dict[str, str]) -> int:
 
 
 def test_http_dns_rebinding_protection_on_by_default(mcp_scope: Scope) -> None:
-    """The SDK's loopback default (Host/Origin allow-list) must stay active (review T10)."""
+    """The SDK's loopback default (Host/Origin allow-list) must stay active (review)."""
     with start_http_in_thread(mcp_scope, port=0) as handle:
         assert _post(handle.url, {}) == 200
         assert _post(handle.url, {"origin": f"http://localhost:{handle.port}"}) == 200

@@ -45,8 +45,12 @@ def _standard_points(rng: np.random.Generator | None = None) -> list[GainPoint]:
     return pts
 
 
+# previous calibration of the fits: typical offsets with one unit's gains (a saved file could have)
+PREVIOUS = Calibration.typical().with_range_gain(tables.TYPICAL_RANGE_GAIN)
+
+
 def _fit(points: list[GainPoint], **kw: Any) -> FitResult:
-    kw.setdefault("previous", Calibration.typical())
+    kw.setdefault("previous", PREVIOUS)
     return fit_calibration(BASE, points, **kw)
 
 
@@ -290,7 +294,7 @@ def test_to_dict_rounded_and_json() -> None:
     assert r["gain_pos"] == float(f"{res.ranges[0.5].gain_pos:.4g}")
     assert len(str(r["before_err_pct_max"]).replace("-", "").replace(".", "").lstrip("0")) <= 4
     assert d["offsets"]["base_ofs"] == 135
-    assert d["previous"]["calibration_id"] == Calibration.typical().calibration_id
+    assert d["previous"]["calibration_id"] == PREVIOUS.calibration_id
 
 
 def test_argument_validation() -> None:

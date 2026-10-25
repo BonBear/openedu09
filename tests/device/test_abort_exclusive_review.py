@@ -9,15 +9,14 @@
 
 from __future__ import annotations
 
-import sys
 import threading
-import types
 from typing import Any
 
 import pytest
 
 from edu09 import units
-from edu09.device.scope import CALIBRATION_MODULE, Scope
+from edu09.device import calibration as calmod
+from edu09.device.scope import Scope
 from edu09.device.worker import DeviceIO
 from edu09.errors import JobAborted
 from edu09.transport.sim import SimTransport
@@ -102,9 +101,7 @@ def test_calibration_default_abort_event_is_thread_local(
         t.join(WAIT_S)
         return units.Calibration.typical()
 
-    fake = types.ModuleType("fake_cal")
-    fake.measure_calibration = measure  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, CALIBRATION_MODULE, fake)
+    monkeypatch.setattr(calmod, "measure_calibration", measure)
     ev = threading.Event()
     sim_scope.calibrate(
         confirm=True, input_disconnected=True, save=False, path=tmp_path / "c", abort_event=ev
@@ -129,9 +126,7 @@ def test_abort_between_calibration_steps_aborts_next_step(
         scope.run_exclusive(lambda io: steps.append(2), timeout_s=WAIT_S)
         return units.Calibration.typical()
 
-    fake = types.ModuleType("fake_cal")
-    fake.measure_calibration = measure  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, CALIBRATION_MODULE, fake)
+    monkeypatch.setattr(calmod, "measure_calibration", measure)
     with pytest.raises(JobAborted):
         sim_scope.calibrate(
             confirm=True, input_disconnected=True, save=True, path=tmp_path / "c.json"

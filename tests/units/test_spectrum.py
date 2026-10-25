@@ -1,4 +1,4 @@
-"""analysis.spectrum / spectrum_average / spectrum_waveform (docs/specs/spectrum.md, task S1)."""
+"""analysis.spectrum / spectrum_average / spectrum_waveform (docs/specs/spectrum.md)."""
 
 from __future__ import annotations
 

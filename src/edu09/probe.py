@@ -12,8 +12,7 @@ while the higher layers are broken. Read-only by default (architecture.md 5, 7.1
 Every OUT/IN report is appended to ``captures/<timestamp>-<cmd>.jsonl`` (format of
 ``edu09.transport.replay``; replayable with ``ReplayTransport`` and ``edu09-probe replay FILE``).
 
-Installed as ``edu09-probe`` (``edu09.probe:main``); from a source checkout
-``python tools/probe.py`` is a thin shim around the same ``main``.
+Installed as ``edu09-probe`` (``edu09.probe:main``); also runnable as ``python -m edu09.probe``.
 """
 
 from __future__ import annotations
@@ -226,7 +225,7 @@ class Session:
         try:
             if self.log_path is not None:
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
-                self._fh = open(self.log_path, "a", encoding="utf-8")  # noqa: SIM115
+                self._fh = open(self.log_path, "a", encoding="utf-8")
                 self._print(f"# logging to {self.log_path}")
         except BaseException:
             self.transport.close()  # __exit__ does not run when __enter__ raises

@@ -1,4 +1,4 @@
-"""Reviewer tests for T9 calibration: an independent front-end model (not the simulator, not
+"""Reviewer tests for the offset calibration: an independent front-end model (not the simulator, not
 ``units.gnd_counts``) checks the sign conventions, the bytes sent and the reading budget."""
 
 from __future__ import annotations

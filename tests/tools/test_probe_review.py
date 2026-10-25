@@ -39,7 +39,7 @@ class RecordingSim(SimTransport):
         super().write(payload)
 
 
-def _run(argv: list[str], transport: object, input_fn=lambda p: "") -> tuple[int, list[str]]:  # noqa: ANN001
+def _run(argv: list[str], transport: object, input_fn=lambda p: "") -> tuple[int, list[str]]:
     lines: list[str] = []
     rc = probe.main(
         [*argv, "--no-capture"],

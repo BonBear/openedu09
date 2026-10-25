@@ -1,4 +1,4 @@
-"""Reviewer tests for T9 auto set: error paths with a minimal fake Scope."""
+"""Reviewer tests for auto set: error paths with a minimal fake Scope."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Reviewer (T10) additions: hostile inputs and the tool surface."""
+"""MCP review additions: hostile inputs and the tool surface."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Review (wave 6): bridge hardening against a hostile or misconfigured environment.
+"""Review: bridge hardening against a hostile or misconfigured environment.
 
 * owner URLs that only *look* local (``127.1``, decimal/hex/octal IPv4, ``localhost.``, IDN,
   IPv4-mapped IPv6, ``0.0.0.0``, user info) are refused;
@@ -118,13 +118,13 @@ def test_off_origin_redirect_is_not_followed(recorder: _Recorder) -> None:
     target = f"http://127.0.0.1:{recorder.port}/mcp"
 
     class Redirect(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802 - http.server API
+        def do_POST(self) -> None:
             self.send_response(307)
             self.send_header("Location", target)
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-        do_GET = do_POST  # noqa: N815
+        do_GET = do_POST
 
         def log_message(self, *a: Any) -> None:
             pass

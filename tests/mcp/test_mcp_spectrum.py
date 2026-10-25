@@ -1,4 +1,4 @@
-"""MCP ``spectrum`` tool (docs/specs/spectrum.md, task S1). Sim-backed only."""
+"""MCP ``spectrum`` tool (docs/specs/spectrum.md). Sim-backed only."""
 
 from __future__ import annotations
 

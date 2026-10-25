@@ -97,7 +97,7 @@ __all__ = [
 Knot = tuple[float, float]
 """One negative-nonlinearity knot ``(r, e)`` in divisions (see ``Calibration``)."""
 
-CalibrationSource = Literal["default", "typical", "file", "ini-import", "measured"]
+CalibrationSource = Literal["default", "typical", "file", "measured"]
 _SOURCES: tuple[str, ...] = get_args(CalibrationSource)
 _ADC_FULL = tables.ADC_MAX  # 255
 
@@ -221,19 +221,20 @@ class Calibration:
 
     @classmethod
     def typical(cls) -> Calibration:
-        """Measured typical values of a real EDU09 (``source="typical"``, protocol.md 11).
+        """Typical offsets of a real EDU09 (``source="typical"``, protocol.md 11), no gain
+        correction.
 
         Fallback for hardware without a calibration file: positions scale correctly (slope
-        ~1.03 instead of the default model's 2) and 0 V is within a few counts. The per-range
-        gains (``tables.TYPICAL_RANGE_GAIN``) were measured on one unit only. A per-unit
-        calibration (``Scope.calibrate`` plus measured gains) is still more accurate.
+        ~1.03 instead of the default model's 2) and 0 V is within a few counts. Gains differ
+        per unit, so none are applied (gain 1.0 on every range; ``tables.TYPICAL_RANGE_GAIN``
+        is one unit's data and is not used here). ``Scope`` reports such a hardware scope as
+        uncalibrated: run the calibration wizard for this unit's offsets and gains.
         """
         return cls(
             base_ofs=tables.TYPICAL_BASE_OFS,
             range_corr=dict(tables.TYPICAL_RANGE_CORR),
             gnd_fit=GndFit(tables.TYPICAL_GND_K, tables.TYPICAL_GND_B),
             source="typical",
-            range_gain=dict(tables.TYPICAL_RANGE_GAIN),
         )
 
     def range_correction(self, vdiv: VoltsPerDiv | float) -> int:
@@ -326,7 +327,8 @@ class Calibration:
         """Inverse of :meth:`to_dict`. Missing keys take defaults; bad data -> CalibrationError.
 
         Unknown keys are rejected (also legacy opaque ``neg_nonlinearity`` data that does not
-        follow the knot format).
+        follow the knot format). The legacy source ``"ini-import"`` (a removed vendor-INI
+        importer) loads as ``"file"``.
         """
         if not isinstance(d, Mapping):
             raise CalibrationError(f"calibration must be a mapping, got {type(d).__name__}")
@@ -334,6 +336,8 @@ class Calibration:
         if unknown:
             raise CalibrationError(f"unknown calibration key(s) {unknown}")
         kwargs: dict[str, Any] = dict(d)
+        if kwargs.get("source") == "ini-import":
+            kwargs["source"] = "file"
         if "gnd_fit" in kwargs:
             g = kwargs["gnd_fit"]
             try:

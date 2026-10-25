@@ -61,7 +61,6 @@ log = logging.getLogger(__name__)
 Mode = Literal["quick", "standard", "full"]
 Uncalibrated = Literal["keep", "typical", "unity"]
 SetupKind = Literal["trimmer", "zero", "reference", "verify"]
-Quality = Literal["good", "fallback"]
 
 MAX_SOURCES: Final = 8
 MAX_LABEL_LEN: Final = 40
@@ -571,7 +570,6 @@ class QualityCode(StrEnum):
     READING_MISMATCH = "reading_mismatch"
     OUT_OF_WINDOW = "out_of_window"
     DRIFT = "drift"
-    DEVICE_ERROR = "device_error"
 
 
 PointStatus = Literal["ok", "warning", "failed"]

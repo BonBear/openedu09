@@ -1,4 +1,4 @@
-"""Simulator (T6): device-side protocol model + round trips through the real host-side codecs."""
+"""Simulator: device-side protocol model + round trips through the real host-side codecs."""
 
 from __future__ import annotations
 

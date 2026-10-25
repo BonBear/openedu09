@@ -1,5 +1,5 @@
-"""Review (wave 6) of the GUI follow-ups: indicator cost per frame, abort of a running
-calibration / exclusive job through the Scope API. Simulator / fakes only."""
+"""Review of the GUI follow-ups: indicator cost per frame, abort of a running calibration /
+exclusive job through the Scope API. Simulator / fakes only."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from edu09.errors import Cancelled, JobAborted
+from edu09.errors import Cancelled
 
 pytestmark = pytest.mark.gui
 
@@ -39,37 +39,34 @@ def test_set_indicator_skips_unchanged_style(qtbot: Any, monkeypatch: pytest.Mon
 def test_quit_anyway_aborts_calibration_through_scope_api(
     qtbot: Any, window: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The GUI calls the plain ``Scope.calibrate`` and aborts it with ``Scope.abort_exclusive``
-    on "quit anyway" (no proxy objects)."""
+    """ "Quit anyway" while the calibration wizard is open aborts the wizard's session and any
+    running exclusive job with the plain ``Scope.abort_exclusive`` (no proxy objects)."""
     scope = window.scope
-    gate = threading.Event()
-    entered = threading.Event()
-    calls: list[dict[str, Any]] = []
     aborts: list[bool] = []
-
-    def calibrate(**kw: Any) -> Any:
-        calls.append(kw)
-        entered.set()
-        gate.wait(10.0)
-        raise JobAborted("aborted")
-
     real_abort = scope.abort_exclusive
 
     def abort_exclusive() -> bool:
         aborts.append(True)
-        gate.set()
         return bool(real_abort())
 
-    monkeypatch.setattr(scope, "calibrate", calibrate)
+    from edu09.gui.cal_wizard import CalibrationWizard
+
+    session_aborts: list[bool] = []
+    real_session_abort = CalibrationWizard.abort_session
+
+    def abort_session(wiz: Any) -> bool:
+        session_aborts.append(True)
+        return real_session_abort(wiz)
+
     monkeypatch.setattr(scope, "abort_exclusive", abort_exclusive)
-    monkeypatch.setattr(window, "confirm_calibration", lambda: True)
+    monkeypatch.setattr(CalibrationWizard, "abort_session", abort_session)
     monkeypatch.setattr(window, "confirm_close_while_busy", lambda _what: "quit")
     window.show()
-    assert window.calibrate()
-    qtbot.waitUntil(entered.is_set, timeout=10_000)
+    wiz = window.open_calibration_wizard()
+    assert wiz is not None and window.busy_job == "calibration"
     assert window.close() is True
-    assert aborts == [True]
-    assert calls == [{"confirm": True, "input_disconnected": True, "save": True}]
+    assert aborts == [True] and session_aborts  # (the wizard's reject may abort it again)
+    assert not wiz.isVisible() and window.cal_wizard is None
 
 
 def test_window_close_then_scope_close_aborts_foreign_exclusive_job(qtbot: Any) -> None:

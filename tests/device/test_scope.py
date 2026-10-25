@@ -1,4 +1,4 @@
-"""Scope facade: settings, events, store, calibration hooks, ownership and concurrency (T7)."""
+"""Scope facade: settings, events, store, calibration hooks, ownership and concurrency."""
 
 from __future__ import annotations
 
@@ -199,16 +199,13 @@ def test_calibrate_requires_confirmation(sim_scope: Scope) -> None:
         sim_scope.calibrate(confirm=False, input_disconnected=True)
 
 
-def test_calibrate_delegates_to_t9_module(
+def test_calibrate_delegates_to_calibration_module(
     sim_scope: Scope, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import sys
-    import types
+    from edu09.device import calibration as calmod
 
     expected = units.Calibration(base_ofs=0x81, source="measured")
-    mod = types.ModuleType("edu09.device.calibration")
-    mod.measure_calibration = lambda scope: expected  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "edu09.device.calibration", mod)
+    monkeypatch.setattr(calmod, "measure_calibration", lambda scope: expected)
     cal = sim_scope.calibrate(confirm=True, input_disconnected=True, path=tmp_path / "c.json")
     assert cal == expected and sim_scope.calibration == expected
     assert storage.load_calibration(tmp_path / "c.json") == expected

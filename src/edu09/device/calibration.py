@@ -1,4 +1,4 @@
-"""Offset/ground calibration (task T9; protocol.md 5.3/5.4 adapted to firmware 1.01).
+"""Offset/ground calibration (protocol.md 5.3/5.4 adapted to firmware 1.01).
 
 The procedure runs on the worker thread through :meth:`Scope.run_exclusive`, so acquisition is
 paused while it measures and the user's configuration is re-sent afterwards (``DeviceIO`` does

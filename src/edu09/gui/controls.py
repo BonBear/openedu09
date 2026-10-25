@@ -85,7 +85,6 @@ class ControlPanel(QWidget):
         self._running = False
         self._pending = False
         self._busy = False
-        self._autoset_available = True
 
         # vertical
         self.vdiv = _combo(
@@ -261,12 +260,6 @@ class ControlPanel(QWidget):
         self._busy = busy
         self._update_enabled()
 
-    def set_autoset_available(self, available: bool, reason: str = "") -> None:
-        self._autoset_available = available
-        if not available and reason:
-            self.autoset_button.setToolTip(reason)
-        self._update_enabled()
-
     def _update_enabled(self) -> None:
         on = self._connected and not self._busy
         for w in (
@@ -283,7 +276,7 @@ class ControlPanel(QWidget):
         self.run_button.setEnabled(on and not self._running)
         self.stop_button.setEnabled(self._connected and (self._running or self._pending))
         self.single_button.setEnabled(on)
-        self.autoset_button.setEnabled(on and self._autoset_available)
+        self.autoset_button.setEnabled(on)
 
     # -- user input ------------------------------------------------------------------------------
     def _request(self, **partial: Any) -> None:

@@ -7,7 +7,7 @@ for example ``GAIN_CODES_CH1[0.5] == 0x01`` and ``TIMEBASES[2e-3].hw_code == 0x0
 Source: ``docs/protocol.md`` (static reverse engineering of EDU09.exe v1.06). Unless a comment says
 "HW-verified", every value is **unverified on hardware**. Open questions are tagged ``Q1``..``Q10``
 (protocol.md section 9 / architecture.md section 9). Correcting a layout after hardware probing
-(task H1) should normally touch only this file plus test fixtures.
+should normally touch only this file plus test fixtures.
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ later) is settled. The worker waits this long after such a ``0x0E`` before ``0x0
 
 # Typical calibration of a real unit (HW-measured 2026-10-24, open input, 3 consistent runs of the
 # driver's calibration). The DAC slope is ~1.03 ad counts per DAC step, NOT the 2 of the
-# original's demo mode (protocol.md 5.3). ``units.Calibration.typical()`` uses these values as the
-# fallback for hardware without a calibration file.
+# original's demo mode (protocol.md 5.3). ``units.Calibration.typical()`` uses these offset values
+# as the fallback for hardware without a calibration file (with no gain correction).
 TYPICAL_BASE_OFS: Final = 0x86
 TYPICAL_RANGE_CORR: Final[dict[float, int]] = {1.0: -1, 0.1: -1}
 TYPICAL_GND_K: Final = 1.03
@@ -157,9 +157,11 @@ TYPICAL_RANGE_GAIN: Final[dict[float, float]] = {
     2.0: 0.981,
     5.0: 0.979,
 }
-"""Per-range gain correction ``V_true / V_read`` measured on ONE unit (2026-10-25: DC reference vs
-multimeter, 5 ms/div, levels 2.4-6 div above ground). The uncorrected scope reads 0.4-2.6 % high,
-i.e. the true counts per division is ``COUNTS_PER_DIV / gain`` (protocol.md 11.3)."""
+"""Per-range gain correction ``V_true / V_read`` measured on one unit; not applied by default
+(2026-10-25: DC reference vs multimeter, 5 ms/div, levels 2.4-6 div above ground). That unit's
+uncorrected scope reads 0.4-2.6 % high, i.e. the true counts per division is
+``COUNTS_PER_DIV / gain`` (protocol.md 11.3). Documentation and simulator data
+(``transport.sim.UNIT1``); the calibration wizard uses it only with ``--uncalibrated typical``."""
 RANGE_GAIN_MIN: Final = 0.8
 RANGE_GAIN_MAX: Final = 1.25
 """Accepted gain corrections are ``RANGE_GAIN_MIN < gain < RANGE_GAIN_MAX`` (exclusive)."""

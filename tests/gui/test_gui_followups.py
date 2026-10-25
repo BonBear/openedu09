@@ -1,4 +1,4 @@
-"""Wave 6 GUI follow-ups: close during calibration/auto-set, MCP stop on close, app teardown,
+"""GUI follow-ups: close during calibration/auto-set, MCP stop on close, app teardown,
 resume after calibration, Qt xcb-cursor pre-flight check, acquisition-state indicator.
 
 Simulator / fakes only (never the real device); no fixed sleeps.
@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 from gui_helpers import FakeMcp, make_window
 
-from edu09 import units
+from edu09 import calwizard as cw
+from edu09.device import autoset
 from edu09.device.scope import Scope
 from edu09.transport.sim import SimTransport
 
@@ -25,27 +26,43 @@ pytestmark = pytest.mark.gui
 
 WAIT_MS = 10_000
 OPEN_INPUT = "dc:0v:noise=40mv"  # disconnected input: calibration succeeds on the sim
+USB = cw.FixedSource("USB", 5.0)
 
 
-def _fake_module(monkeypatch: pytest.MonkeyPatch, name: str, **attrs: Any) -> None:
-    mod = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(mod, k, v)
-    monkeypatch.setitem(sys.modules, name, mod)
-
-
-def _gated_calibration(monkeypatch: pytest.MonkeyPatch, scope: Scope, tmp_path: Path) -> Any:
-    """Fake T9 module whose measurement blocks until ``gate`` is set (bounded)."""
+def _gated_autoset(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Auto-set stand-in that blocks until ``gate`` is set (bounded): a long background job."""
     state = types.SimpleNamespace(entered=threading.Event(), gate=threading.Event())
 
-    def measure_calibration(_scope: Any) -> units.Calibration:
+    def auto_set(_scope: Scope, timeout_s: float = 5.0) -> Any:
         state.entered.set()
         state.gate.wait(WAIT_MS / 1000)
-        return units.Calibration(source="measured")
+        return None
 
-    _fake_module(monkeypatch, "edu09.device.calibration", measure_calibration=measure_calibration)
-    monkeypatch.setattr(scope, "_calibration_path", tmp_path / "cal.json")
+    monkeypatch.setattr(autoset, "auto_set", auto_set)
     return state
+
+
+def _open_wizard(win: Any) -> Any:
+    wiz = win.open_calibration_wizard()
+    assert wiz is not None and win.busy_job == "calibration"
+    wiz.confirm_abort = lambda: True  # closing with measured points: discard without asking
+    return wiz
+
+
+def _start_zero_step(qtbot: Any, wiz: Any) -> None:
+    """Sources -> plan -> click "measure" on the zero step (runs in the background)."""
+    from edu09.gui.cal_wizard import PAGE_PLAN, PAGE_STEP
+
+    wiz.sources_page.set_sources([USB])
+    wiz.sources_page.mode.setCurrentText("quick")
+    wiz.sources_page.trimmer.setChecked(False)
+    wiz.next()
+    assert wiz.currentId() == PAGE_PLAN, wiz.sources_page.error.text()
+    wiz.next()
+    assert wiz.currentId() == PAGE_STEP, wiz.plan_page.error.text()
+    assert wiz.session.view().needs == "input_disconnected"
+    wiz.step_page.disconnected.setChecked(True)
+    wiz.step_page.measure_btn.click()
 
 
 @pytest.fixture
@@ -64,53 +81,51 @@ def open_rtscope(tmp_path: Path) -> Iterator[Scope]:
 
 
 def test_close_during_calibration_wait_then_quit(
-    qtbot: Any, window: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    qtbot: Any, window: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cal = _gated_calibration(monkeypatch, window.scope, tmp_path)
     asked: list[str] = []
-    monkeypatch.setattr(window, "confirm_calibration", lambda: True)
     monkeypatch.setattr(
         window, "confirm_close_while_busy", lambda what: asked.append(what) or "wait"
     )
     window.show()
-    assert window.calibrate()
-    qtbot.waitUntil(cal.entered.is_set, timeout=WAIT_MS)
+    wiz = _open_wizard(window)
 
     t0 = time.monotonic()
     assert window.close() is False  # not closed yet, and the GUI thread did not block
     assert time.monotonic() - t0 < 1.0
     assert asked == ["calibration"]
     assert window.isVisible() and window.quit_pending and not window._shut_down
+    assert wiz.isVisible()  # the wizard stays open
     assert "QUIT PENDING" in window.controls.state_indicator.text()
     assert "Waiting for the calibration" in window.statusBar().currentMessage()
 
-    cal.gate.set()  # calibration finishes -> the window closes by itself
+    wiz.reject()  # the user closes the wizard -> the window closes by itself
     qtbot.waitUntil(lambda: window._shut_down and not window.isVisible(), timeout=WAIT_MS)
-    assert "Calibration done" in window.log_view.toPlainText()
-    assert (tmp_path / "cal.json").exists()
+    assert "calibration unchanged" in window.log_view.toPlainText()
 
 
-def test_close_during_calibration_cancel_keeps_window(
-    qtbot: Any, window: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_close_during_autoset_cancel_keeps_window(
+    qtbot: Any, window: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cal = _gated_calibration(monkeypatch, window.scope, tmp_path)
+    job = _gated_autoset(monkeypatch)
     answers = iter(["wait", "cancel"])
-    monkeypatch.setattr(window, "confirm_calibration", lambda: True)
     monkeypatch.setattr(window, "confirm_close_while_busy", lambda _what: next(answers))
     window.show()
-    window.calibrate()
-    qtbot.waitUntil(cal.entered.is_set, timeout=WAIT_MS)
-    assert window.close() is False and window.quit_pending
-    assert window.close() is False and not window.quit_pending  # second close: cancel the quit
-    cal.gate.set()
+    window.auto_set()
+    qtbot.waitUntil(job.entered.is_set, timeout=WAIT_MS)
+    try:
+        assert window.close() is False and window.quit_pending
+        assert window.close() is False and not window.quit_pending  # second close: cancel quit
+    finally:
+        job.gate.set()
     qtbot.waitUntil(lambda: window.busy_job is None, timeout=WAIT_MS)
-    qtbot.waitUntil(lambda: "Calibration done" in window.log_view.toPlainText(), timeout=WAIT_MS)
     assert window.isVisible() and not window._shut_down
 
 
 def test_close_during_real_calibration_quit_anyway_aborts_and_stops_device(
     qtbot: Any, open_rtscope: Scope, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Calibration wizard zero step (real session) on the real-time simulator, then quit."""
     from edu09.device import calibration as calmod
 
     scope = open_rtscope
@@ -131,17 +146,18 @@ def test_close_during_real_calibration_quit_anyway_aborts_and_stops_device(
     monkeypatch.setattr(calmod, "_measure", spy)
     scope.run()
     win = make_window(qtbot, scope)
-    monkeypatch.setattr(win, "confirm_calibration", lambda: True)
     monkeypatch.setattr(win, "confirm_close_while_busy", lambda _what: "quit")
     win.show()
     qtbot.waitUntil(lambda: win._running, timeout=WAIT_MS)
-    assert win.calibrate()
+    wiz = _open_wizard(win)
+    _start_zero_step(qtbot, wiz)
     qtbot.waitUntil(entered.is_set, timeout=WAIT_MS)
 
     t0 = time.monotonic()
     assert win.close() is True
-    assert time.monotonic() - t0 < 1.0  # no join of the ~4 s calibration on the GUI thread
+    assert time.monotonic() - t0 < 1.0  # no join of the ~4 s measurement on the GUI thread
     assert win._shut_down and win.adapter.closed
+    assert not wiz.isVisible()
 
     # the procedure stops at its next device call ...
     qtbot.waitUntil(lambda: bool(outcome), timeout=WAIT_MS)
@@ -169,7 +185,7 @@ def test_close_during_autoset_quit_anyway_does_not_block(
         gate.wait(WAIT_MS / 1000)
         return None
 
-    _fake_module(monkeypatch, "edu09.device.autoset", auto_set=auto_set)
+    monkeypatch.setattr(autoset, "auto_set", auto_set)
     answers = iter(["cancel", "quit"])
     monkeypatch.setattr(window, "confirm_close_while_busy", lambda _what: next(answers))
     window.show()
@@ -267,46 +283,45 @@ def test_main_closes_scope_when_window_construction_fails(
 # -- 4. resume after calibration -----------------------------------------------------------------
 
 
-def test_calibration_resumes_running(
-    qtbot: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Real T9 procedure on the virtual sim: running before -> running after (also when the
-    procedure left the scope stopped)."""
+def test_calibration_resumes_running(qtbot: Any, tmp_path: Path) -> None:
+    """Calibration wizard with a real zero measurement on the virtual sim: running before ->
+    running after (also when acquisition was stopped meanwhile); stopped before -> stopped."""
     scope = Scope.open(SimTransport.virtual(OPEN_INPUT, seed=0), reconnect_interval_s=0.01)
     try:
         scope._calibration_path = tmp_path / "cal.json"  # type: ignore[attr-defined]
         win = make_window(qtbot, scope)
         try:
-            monkeypatch.setattr(win, "confirm_calibration", lambda: True)
             win.run()
             qtbot.waitUntil(lambda: win._running, timeout=WAIT_MS)
-            assert win.calibrate()
-            qtbot.waitUntil(lambda: win.busy_job is None, timeout=WAIT_MS * 3)
-            assert "Calibration done (source: measured)" in win.log_view.toPlainText()
-            assert scope.running and win._running
+            wiz = _open_wizard(win)
+            _start_zero_step(qtbot, wiz)
+            qtbot.waitUntil(lambda: not wiz.step_page.is_busy, timeout=WAIT_MS * 3)
+            assert wiz.session.results, "zero step did not run"
+            wiz.reject()
+            qtbot.waitUntil(lambda: win.busy_job is None, timeout=WAIT_MS)
+            assert "calibration unchanged" in win.log_view.toPlainText()
+            qtbot.waitUntil(lambda: win._running and scope.running, timeout=WAIT_MS)
 
-            # a procedure that leaves the scope stopped: the GUI restarts it
-            from edu09.device import calibration as calmod
-
-            real = calmod.measure_calibration
-
-            def stopping(sc: Any) -> units.Calibration:
-                cal = real(sc)
-                sc.stop()
-                return cal
-
-            monkeypatch.setattr(calmod, "measure_calibration", stopping)
-            assert win.calibrate()
-            qtbot.waitUntil(lambda: win.busy_job is None, timeout=WAIT_MS * 3)
+            # acquisition stopped while the wizard is open: the GUI restarts it on close
+            wiz = _open_wizard(win)
+            scope.stop()
+            qtbot.waitUntil(lambda: not win._running, timeout=WAIT_MS)
+            wiz.reject()
+            qtbot.waitUntil(lambda: win.busy_job is None, timeout=WAIT_MS)
             qtbot.waitUntil(lambda: win._running and scope.running, timeout=WAIT_MS)
             assert win.controls.indicator_kind in ("running", "waiting")
 
             # stopped before -> stays stopped
             win.stop()
             qtbot.waitUntil(lambda: not win._running, timeout=WAIT_MS)
-            assert win.calibrate()
-            qtbot.waitUntil(lambda: win.busy_job is None, timeout=WAIT_MS * 3)
+            wiz = _open_wizard(win)
+            wiz.reject()
+            qtbot.waitUntil(lambda: win.busy_job is None, timeout=WAIT_MS)
+            done: list[bool] = []
+            win.adapter.call(lambda: None, on_result=lambda _r: done.append(True))
+            qtbot.waitUntil(lambda: bool(done), timeout=WAIT_MS)
             assert not scope.running
+            assert not (tmp_path / "cal.json").exists()  # nothing saved without "save"
         finally:
             win.shutdown()
     finally:

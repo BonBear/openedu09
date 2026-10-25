@@ -261,28 +261,7 @@ def test_http_stop_aborts_session(mcp_scope: Scope, fake: type[FakeSession]) -> 
 # --------------------------------------------------------------------------- real session
 
 
-def _real_session_available() -> bool:
-    """True once Task B's ``CalibrationSession`` is implemented (not the published stub)."""
-    from edu09.calwizard import plan_calibration
-    from edu09.calwizard.session import CalibrationSession
-    from edu09.transport.sim import SimTransport
-
-    scope = Scope.open(SimTransport.virtual(seed=0), reconnect_interval_s=0.01)
-    try:
-        sess = CalibrationSession(scope, plan_calibration([]))
-        try:
-            sess.start()
-        except NotImplementedError:
-            return False
-        sess.abort()
-        return True
-    finally:
-        scope.close()
-
-
 def test_end_to_end_real_session_on_sim(tmp_path: Any) -> None:
-    if not _real_session_available():
-        pytest.skip("CalibrationSession not implemented yet (Task B)")
     from edu09.transport.sim import UNIT1, SimTransport
 
     tr = SimTransport.virtual("dc:0v", seed=0)

@@ -1,4 +1,4 @@
-"""T9 calibration: offset search, ground fit and range corrections on a simulated front end."""
+"""Offset calibration: offset search, ground fit and range corrections on a simulated front end."""
 
 from __future__ import annotations
 

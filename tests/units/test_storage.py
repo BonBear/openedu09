@@ -97,48 +97,19 @@ def test_default_paths_use_platformdirs(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert storage.load_calibration().base_ofs == 111
 
 
-# ---- INI import ----
+# ---- legacy source ----
 
 
-def _ini(tmp_path: Path, body: str) -> Path:
-    p = tmp_path / "EDU09.ini"
-    p.write_text(body)
-    return p
-
-
-def test_import_ini(tmp_path: Path) -> None:
-    p = _ini(
-        tmp_path,
-        "[Calibration]\nCh1_pos0=100\nCh1_pos1=128\nCh1_pos2=156\n"
-        "Ch1_ad0=72\nCh1_ad1=128\nCh1_ad2=184\n[Other]\nx=1\n",
-    )
-    before = p.read_text()
-    cal = storage.import_vendor_ini(p)
-    assert cal.source == "ini-import"
-    assert cal.gnd_fit.k == pytest.approx(2.0)
-    assert cal.gnd_fit.b == pytest.approx(-128.0)
-    assert cal.gnd_fit == GndFit.from_points([(100, 72), (128, 128), (156, 184)])
-    assert p.read_text() == before
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        "[Other]\nx=1\n",
-        "[Calibration]\nCh1_pos0=1\n",
-        "[Calibration]\nCh1_pos0=a\nCh1_pos1=2\nCh1_pos2=3\nCh1_ad0=1\nCh1_ad1=2\nCh1_ad2=3\n",
-        "[Calibration]\nCh1_pos0=5\nCh1_pos1=5\nCh1_pos2=7\nCh1_ad0=1\nCh1_ad1=2\nCh1_ad2=3\n",
-        "garbage without section",
-    ],
-)
-def test_import_ini_invalid(tmp_path: Path, body: str) -> None:
+def test_legacy_ini_import_source_loads_as_file(tmp_path: Path) -> None:
+    """The vendor-INI importer was removed; a file it could have produced still loads."""
+    d = Calibration(base_ofs=120).to_dict()
+    d["source"] = "ini-import"
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"version": 1, "calibration": d}))
+    assert storage.load_calibration(p).source == "file"
+    assert Calibration.from_dict(d) == Calibration(base_ofs=120, source="file")
     with pytest.raises(CalibrationError):
-        storage.import_vendor_ini(_ini(tmp_path, body))
-
-
-def test_import_ini_missing(tmp_path: Path) -> None:
-    with pytest.raises(CalibrationError):
-        storage.import_vendor_ini(tmp_path / "none.ini")
+        Calibration(source="ini-import")  # type: ignore[arg-type]
 
 
 # ---- CSV ----
@@ -240,18 +211,7 @@ def test_store_threaded() -> None:
     assert len(s) == 8
 
 
-# ---- review edge cases (wave 3) ----
-
-
-def test_import_ini_bom_and_decimal_comma(tmp_path: Path) -> None:
-    """Notepad re-save adds a BOM; Delphi FloatToStr writes '72,5' on sv/fi locales."""
-    p = tmp_path / "EDU09.ini"
-    p.write_bytes(
-        b"\xef\xbb\xbf[Calibration]\r\nCh1_pos0=100\r\nCh1_pos1=128\r\nCh1_pos2=156\r\n"
-        b"Ch1_ad0=72,0\r\nCh1_ad1=128,0\r\nCh1_ad2=184,0\r\n"
-    )
-    cal = storage.import_vendor_ini(p)
-    assert cal.gnd_fit == GndFit.from_points([(100, 72), (128, 128), (156, 184)])
+# ---- review edge cases ----
 
 
 @pytest.mark.parametrize(
@@ -274,14 +234,3 @@ def test_resolve_export_path_rejects_symlink_escape(tmp_path: Path) -> None:
         pytest.skip("symlinks not available")
     with pytest.raises(ValueError):
         storage.resolve_export_path("link/x.csv", base)
-
-
-def test_ini_import_tolerates_duplicate_keys(tmp_path):
-    ini = tmp_path / "EDU09.ini"
-    ini.write_text(
-        "[Calibration]\nCh1_pos0=10\nCh1_pos0=11\nCh1_pos1=100\nCh1_pos2=200\n"
-        "Ch1_ad0=200\nCh1_ad1=150\nCh1_ad2=100\n"
-    )
-
-    cal = storage.import_vendor_ini(ini)
-    assert cal is not None

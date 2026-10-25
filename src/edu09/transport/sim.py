@@ -408,8 +408,6 @@ class VirtualClock:
         if seconds > 0:
             self.now += seconds
 
-    advance = sleep
-
 
 # --------------------------------------------------------------------------------------------------
 # Device model
@@ -502,7 +500,6 @@ class SimulatedDevice:
         self.drop_frame_report: int | None = None
         self.trim_gain: float = 1.0
         self.adc_noise_counts: float = float(adc_noise_counts)
-        self._seed = seed
         self._rng = np.random.default_rng(seed)
         self._epoch = clock()
         self.received: list[int] = []

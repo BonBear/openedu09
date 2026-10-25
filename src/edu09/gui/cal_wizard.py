@@ -309,7 +309,7 @@ class SourcesPage(QWizardPage):
             uncalibrated=self.uncal.currentText(),  # type: ignore[arg-type]
         )
 
-    def validatePage(self) -> bool:  # noqa: N802 - Qt API
+    def validatePage(self) -> bool:
         self.error.clear()
         try:
             sources = self.sources()
@@ -353,7 +353,7 @@ class PlanPage(QWizardPage):
         self.error.setStyleSheet("QLabel { color: #d1495b; }")
         lay.addWidget(self.error)
 
-    def initializePage(self) -> None:  # noqa: N802 - Qt API
+    def initializePage(self) -> None:
         plan = self.wiz.plan
         self.error.clear()
         self.steps.clear()
@@ -381,7 +381,7 @@ class PlanPage(QWizardPage):
         self.coverage.setVerticalHeaderLabels(labels)
         self.warnings.setText("\n".join(plan.warnings))
 
-    def validatePage(self) -> bool:  # noqa: N802 - Qt API
+    def validatePage(self) -> bool:
         try:
             self.wiz.start_session()
         except Exception as exc:
@@ -499,12 +499,12 @@ class StepPage(QWizardPage):
         self._update_buttons()
         self.completeChanged.emit()
 
-    def initializePage(self) -> None:  # noqa: N802 - Qt API
+    def initializePage(self) -> None:
         self.results.clear()
         self._shown_setup = None
         self.refresh()
 
-    def cleanupPage(self) -> None:  # noqa: N802 - Qt API
+    def cleanupPage(self) -> None:
         self.stop_trimmer()
 
     def _phase_over(self, view: Any) -> bool:
@@ -591,7 +591,7 @@ class StepPage(QWizardPage):
             and not self.wiz.reverted
         )
 
-    def isComplete(self) -> bool:  # noqa: N802 - Qt API
+    def isComplete(self) -> bool:
         sess = self.wiz.session
         if sess is None or self._busy or self._trim_live:
             return False
@@ -798,7 +798,7 @@ class PreviewPage(QWizardPage):
         self.discard_btn.setEnabled(not busy and self.saved is None and not self.discard)
         self.completeChanged.emit()
 
-    def initializePage(self) -> None:  # noqa: N802 - Qt API
+    def initializePage(self) -> None:
         sess = self.wiz.session
         if sess is None or self.saved is not None:
             return
@@ -892,10 +892,10 @@ class PreviewPage(QWizardPage):
         )
         self._set_busy(False)
 
-    def isComplete(self) -> bool:  # noqa: N802 - Qt API
+    def isComplete(self) -> bool:
         return not self._busy and (self.saved is not None or self.discard)
 
-    def nextId(self) -> int:  # noqa: N802 - Qt API
+    def nextId(self) -> int:
         if self.saved is not None and self.wiz.has_verify:
             return PAGE_VERIFY
         return -1
@@ -1059,7 +1059,7 @@ class CalibrationWizard(QWizard):
         self.abort_session()
         super().accept()
 
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+    def closeEvent(self, event: QCloseEvent) -> None:
         self.reject()
         if self.isVisible():
             event.ignore()

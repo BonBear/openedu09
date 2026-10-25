@@ -1,4 +1,5 @@
-"""Shared pytest configuration: --hardware option, marker handling, sim fixtures."""
+"""Shared pytest configuration: --hardware option, marker handling, user-dir isolation, sim
+scope fixture."""
 
 from __future__ import annotations
 
@@ -57,14 +58,6 @@ def _isolate_user_dirs(
         monkeypatch.setattr(platformdirs, name, fake)
     if not request.node.get_closest_marker("hardware"):
         monkeypatch.delenv("EDU09_RUNTIME_DIR", raising=False)
-
-
-@pytest.fixture
-def sim_transport() -> object:
-    """Placeholder: becomes a SimTransport once edu09.transport.sim lands (T6)."""
-    if importlib.util.find_spec("edu09.transport.sim") is None:
-        pytest.skip("edu09.transport.sim not implemented yet (T6)")
-    return importlib.import_module("edu09.transport.sim").SimTransport.virtual(seed=0)
 
 
 @pytest.fixture

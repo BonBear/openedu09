@@ -29,7 +29,7 @@ def test_minmax_points_stay_in_their_bucket(n: int, max_points: int) -> None:
 
 
 def test_minmax_constant_signal_emits_one_point_per_bucket() -> None:
-    # Non-uniform output length: consumers must use ``indices``, not a fixed step (see T10).
+    # Non-uniform output length: consumers must use ``indices``, not a fixed step (MCP payloads).
     d = decimate(np.zeros(1024), 64)
     assert d.values.size == 32
     assert np.all(np.diff(d.indices) == d.factor)

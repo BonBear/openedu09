@@ -664,7 +664,6 @@ class CalibrationSession:
         ground_source: Literal["map", "model"],
         v_ref: float,
         v_read: float,
-        cpd: float,
     ) -> PointResult:
         vdiv = p.vdiv
         code, status, msg, hint = QualityCode.OK, "ok", "", ""
@@ -756,7 +755,7 @@ class CalibrationSession:
             if g is None:
                 g, src = float(units.gnd_counts(ch, calm)), "model"
             v_read = (r.mean - g) * sadc * p.vdiv / cpd
-            return self._classify(p, r, g, src, v_ref, v_read, cpd)
+            return self._classify(p, r, g, src, v_ref, v_read)
 
         def job(io: DeviceIO) -> tuple[list[PointResult], int | None, PointResult | None]:
             out: list[PointResult] = []
@@ -849,7 +848,6 @@ class CalibrationSession:
         if not keep:
             return self._out_of_window_result(s, v_ref, dropped, notes)
         cal = self._scope.calibration
-        cpd = cal.counts_per_div
 
         def job(io: DeviceIO) -> list[tuple[PointResult, bool]]:
             out = []
@@ -860,7 +858,7 @@ class CalibrationSession:
                 r = devcal.LevelReading.from_samples(x, dac, p.vdiv)
                 v_scope = float(np.mean(units.counts_to_volts(x, ch, cal)))
                 g = float(units.gnd_counts(ch, cal))
-                out.append(self._verify_point(p, r, g, v_ref, v_scope, cpd))
+                out.append(self._verify_point(p, r, g, v_ref, v_scope))
             return out
 
         try:
@@ -895,11 +893,10 @@ class CalibrationSession:
         ground: float,
         v_ref: float,
         v_scope: float,
-        cpd: float,
     ) -> tuple[PointResult, bool]:
         """Verify one point; returns (result, measurement valid). A valid measurement passes
         when ``|v_scope - v_ref| <= 0.5 % |v_ref| + 0.05 div``."""
-        pr = self._classify(p, r, ground, "model", v_ref, v_scope, cpd)
+        pr = self._classify(p, r, ground, "model", v_ref, v_scope)
         if pr.status == "failed" and pr.code is not QualityCode.READING_MISMATCH:
             return pr, False  # saturated / noisy / no signal / polarity: not a verdict
         tol = VERIFY_REL * abs(v_ref) + VERIFY_DIV * p.vdiv
@@ -1156,7 +1153,7 @@ class CalibrationSession:
                 if f.stat().st_mtime >= t0 - 1.0
             ]
             backup = max(baks, key=lambda f: f.stat().st_mtime) if baks else None
-        except Exception:  # noqa: BLE001 - best effort diagnostics only
+        except Exception:  # best effort diagnostics only
             return
         self._partial_save = SaveResult(True, backup, cal.calibration_id, target)
 

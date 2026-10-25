@@ -284,9 +284,7 @@ def _trimmer_live(session: Any, ask: Callable[[str], str], out: IO[str], yes: bo
     session.trimmer_done()
 
 
-def _run_session(
-    session: Any, ask: Callable[[str], str], out: IO[str], yes: bool, simulated: bool
-) -> int:
+def _run_session(session: Any, ask: Callable[[str], str], out: IO[str], yes: bool) -> int:
     from edu09.calwizard.session import CalibrationSession
 
     assert isinstance(session, CalibrationSession)
@@ -513,7 +511,7 @@ def main(
     session = None
     try:
         session = CalibrationSession(scope, plan, path=args.calibration, sim=sim)
-        return _run_session(session, asker, o, args.yes, args.simulate)
+        return _run_session(session, asker, o, args.yes)
     except (_Quit, KeyboardInterrupt, EOFError, JobAborted):
         was_saved = False
         if session is not None:

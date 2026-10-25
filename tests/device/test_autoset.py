@@ -1,4 +1,4 @@
-"""T9 auto set on the simulator (+ frequency detection on the H1 hardware frames)."""
+"""Auto set on the simulator (+ frequency detection on the H1 hardware frames)."""
 
 from __future__ import annotations
 

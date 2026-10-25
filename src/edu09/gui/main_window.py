@@ -8,10 +8,7 @@ non-blocking snapshots (``scope.settings``, ``scope.status``, ``scope.latest()``
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import logging
-import sys
 import threading
 import time
 from datetime import datetime
@@ -36,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from edu09 import analysis, storage
+from edu09.device import autoset
 from edu09.device.worker import (
     ConnectionEvent,
     ErrorEvent,
@@ -52,14 +50,10 @@ from edu09.gui.qt_bridge import GUI_SOURCE, ScopeQtAdapter
 from edu09.gui.spectrum import SpectrumPanel
 from edu09.model import Settings, TriggerMode, Waveform
 
-__all__ = ["CloseChoice", "JobAborted", "MainWindow", "module_available"]
+__all__ = ["CloseChoice", "JobAborted", "MainWindow"]
 
 log = logging.getLogger(__name__)
 
-MCP_SERVER_MODULE = "edu09.mcp_server.server"
-AUTOSET_MODULE = "edu09.device.autoset"
-CALIBRATION_MODULE = "edu09.device.calibration"
-CALWIZARD_MODULE = "edu09.calwizard"
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_MCP_PORT = 8765
 SINGLE_TIMEOUT_S = 10.0
@@ -68,16 +62,10 @@ RENDER_INTERVAL_MS = 33  # ~30 fps
 MEASURE_INTERVAL_MS = 250
 MCP_STOP_TIMEOUT_S = 3.0  # bound for joining MCP server stops on close (GUI thread)
 TRIGGER_WAIT_MIN_S = 0.5  # armed this long without a frame -> "WAITING FOR TRIGGER"
+UNCALIBRATED_COLOR = "#e07b00"  # orange status-bar label
 
 CloseChoice = str
 """``confirm_close_while_busy`` answer: ``"wait"``, ``"quit"`` or ``"cancel"``."""
-
-CALIBRATION_TEXT = (
-    "Calibration measures the ground level and gain of every V/div range and overwrites the "
-    "stored calibration (the previous file is backed up).\n\n"
-    "DISCONNECT THE PROBE / INPUT SIGNAL from CH1 now.\n\n"
-    "Is the input disconnected and do you want to calibrate?"
-)
 
 
 class _SessionAbort(threading.Event):
@@ -94,16 +82,6 @@ class _SessionAbort(threading.Event):
             self._abort()
         except Exception:
             log.warning("could not abort the calibration session", exc_info=True)
-
-
-def module_available(name: str) -> bool:
-    """True if ``name`` can be imported (without importing it, where possible)."""
-    if name in sys.modules:
-        return sys.modules[name] is not None
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError):
-        return False
 
 
 class MainWindow(QMainWindow):
@@ -202,11 +180,22 @@ class MainWindow(QMainWindow):
         # status bar
         sb = self.statusBar()
         self.conn_label = QLabel()
+        self.cal_label = QLabel()  # "Uncalibrated" (hardware without a calibration file)
+        self.cal_label.setStyleSheet(
+            f"QLabel {{ color: {UNCALIBRATED_COLOR}; font-weight: bold; }}"
+        )
+        self.cal_label.hide()
         self.fw_label = QLabel()
         self.state_label = QLabel()
         self.owner_label = QLabel()
         self.owner_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        for w in (self.conn_label, self.fw_label, self.state_label, self.owner_label):
+        for w in (
+            self.conn_label,
+            self.cal_label,
+            self.fw_label,
+            self.state_label,
+            self.owner_label,
+        ):
             sb.addPermanentWidget(w)
 
         self._build_menus()
@@ -247,16 +236,9 @@ class MainWindow(QMainWindow):
         self._running = status.running
         self.controls.set_running(status.running)
         self._apply_connected(status.connected)
-        if not module_available(AUTOSET_MODULE):
-            self.controls.set_autoset_available(False, "Auto-set is not available in this build")
-            self.autoset_action.setEnabled(False)
-            self.autoset_action.setToolTip("Auto-set is not available in this build")
-        if not self._calibration_available():
-            self.calibrate_action.setEnabled(False)
-            self.calibrate_action.setToolTip("Calibration is not available in this build")
-        if not module_available(MCP_SERVER_MODULE):
-            self._disable_mcp("MCP server is not available (install the 'mcp' package)")
         self._update_labels()
+        if status.calibration_warning is not None:
+            self.log_message(f"Warning: {status.calibration_warning}")
         latest = self.scope.latest()
         if latest is not None:
             self._on_waveform(latest)
@@ -458,7 +440,7 @@ class MainWindow(QMainWindow):
         self.controls.set_connected(connected)
         for a in (self.run_action, self.stop_action, self.single_action):
             a.setEnabled(connected)
-        self.autoset_action.setEnabled(connected and module_available(AUTOSET_MODULE))
+        self.autoset_action.setEnabled(connected)
         if connected:
             self._disconnected_since = None
             self._reconnect_timer.stop()
@@ -529,8 +511,9 @@ class MainWindow(QMainWindow):
         self._update_indicator()
         self.fw_label.setText(f"FW {self._firmware}" if self._firmware else "FW —")
         self.state_label.setText(f"State: {self._state}")
-        parts: list[str] = []
         st = self.scope.status
+        self._update_cal_label(st.calibration_warning)
+        parts: list[str] = []
         if st.simulated:
             parts.append("Simulated device")
         elif st.owner is not None:
@@ -540,6 +523,15 @@ class MainWindow(QMainWindow):
         elif self._mcp_starting:
             parts.append("MCP: starting…")
         self.owner_label.setText("   ".join(parts))
+
+    def _update_cal_label(self, warning: str | None) -> None:
+        """Persistent "Uncalibrated" label (tooltip: how to calibrate) while it applies."""
+        text = "" if warning is None else "⚠ Uncalibrated"
+        if text == self.cal_label.text():
+            return
+        self.cal_label.setText(text)
+        self.cal_label.setToolTip(warning or "")
+        self.cal_label.setVisible(warning is not None)
 
     # -- actions ---------------------------------------------------------------------------------
     def _on_settings_requested(self, partial: dict[str, Any]) -> None:
@@ -567,10 +559,8 @@ class MainWindow(QMainWindow):
         if not busy:
             self._job_abort = None
         self.controls.set_busy(busy)
-        self.calibrate_action.setEnabled(not busy and self._calibration_available())
-        self.autoset_action.setEnabled(
-            not busy and self._connected and module_available(AUTOSET_MODULE)
-        )
+        self.calibrate_action.setEnabled(not busy)
+        self.autoset_action.setEnabled(not busy and self._connected)
         self._update_indicator()
         if not busy and self._quit_pending and not self._shut_down:
             # "wait, then quit": the job is done now (re-checked: the user may cancel meanwhile)
@@ -579,10 +569,6 @@ class MainWindow(QMainWindow):
     def _close_if_quit_pending(self) -> None:
         if self._quit_pending and not self._busy and not self._shut_down:
             self.close()
-
-    @staticmethod
-    def _calibration_available() -> bool:
-        return module_available(CALIBRATION_MODULE) and module_available(CALWIZARD_MODULE)
 
     @property
     def busy_job(self) -> str | None:
@@ -600,8 +586,7 @@ class MainWindow(QMainWindow):
         scope = self.scope
 
         def job() -> Any:
-            mod: Any = importlib.import_module(AUTOSET_MODULE)
-            result = mod.auto_set(scope, timeout_s=AUTOSET_TIMEOUT_S)
+            result = autoset.auto_set(scope, timeout_s=AUTOSET_TIMEOUT_S)
             if was_running and not scope.running:
                 scope.run()
             return result
@@ -620,9 +605,6 @@ class MainWindow(QMainWindow):
             self._set_busy(False)
 
         def failed(exc: BaseException) -> None:
-            if isinstance(exc, ImportError):
-                self.controls.set_autoset_available(False, f"Auto-set unavailable: {exc}")
-                self.autoset_action.setEnabled(False)
             self.notify(f"Auto-set failed: {type(exc).__name__}: {exc}")
             self._set_busy(False)
 
@@ -630,54 +612,6 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "auto-set")
         self.statusBar().showMessage("Auto-set running…")
         self.adapter.call_background(job, done, failed, what="auto-set")
-
-    def confirm_calibration(self) -> bool:
-        """Ask the user to disconnect the input (overridable in tests)."""
-        answer = QMessageBox.warning(
-            self,
-            "Calibrate EDU09",
-            CALIBRATION_TEXT,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        return answer == QMessageBox.StandardButton.Yes
-
-    def calibrate(self) -> bool:
-        """Confirm, then run ``Scope.calibrate`` in the background. Returns False if declined.
-
-        "Quit anyway" on close aborts it through ``Scope.abort_exclusive`` (it ends with
-        ``JobAborted`` at its next device call and saves nothing). Continuous acquisition is
-        resumed afterwards if it was running.
-        """
-        if self._busy or not self.confirm_calibration():
-            return False
-        scope = self.scope
-        was_running = self._running
-        abort = threading.Event()
-
-        def job() -> Any:
-            try:
-                return scope.calibrate(confirm=True, input_disconnected=True, save=True)
-            finally:
-                if was_running and not abort.is_set() and not scope.closed and not scope.running:
-                    try:
-                        scope.run()
-                    except Exception:  # incl. TimeoutError, Edu09Error
-                        log.warning("could not resume acquisition after calibration", exc_info=True)
-
-        def done(cal: Any) -> None:
-            self.notify(f"Calibration done (source: {getattr(cal, 'source', '?')})")
-            self._set_busy(False)
-
-        def failed(exc: BaseException) -> None:
-            self.notify(f"Calibration failed: {type(exc).__name__}: {exc}")
-            self._set_busy(False)
-
-        self._job_abort = abort
-        self._set_busy(True, "calibration")
-        self.statusBar().showMessage("Calibrating… keep the input disconnected")
-        self.adapter.call_background(job, done, failed, what="calibration")
-        return True
 
     def open_calibration_wizard(self) -> Any:
         """Open the calibration wizard (window-modal, non-blocking). Returns it, or None if
@@ -715,6 +649,7 @@ class MainWindow(QMainWindow):
         else:
             self.notify(f"Calibration wizard closed ({state}); calibration unchanged")
         self._set_busy(False)
+        self._update_labels()  # a saved calibration clears "Uncalibrated"
         if was_running and not self.scope.closed and not self.scope.running:
             self.adapter.run()
 
@@ -753,13 +688,6 @@ class MainWindow(QMainWindow):
     def mcp_url(self) -> str | None:
         return None if self._mcp_handle is None else str(self._mcp_handle.url)
 
-    def _disable_mcp(self, reason: str) -> None:
-        self.mcp_action.blockSignals(True)
-        self.mcp_action.setChecked(False)
-        self.mcp_action.blockSignals(False)
-        self.mcp_action.setEnabled(False)
-        self.mcp_action.setToolTip(reason)
-
     def set_mcp_enabled(self, enabled: bool) -> None:
         """Start/stop the in-process MCP HTTP server (also the menu toggle's slot)."""
         if self.mcp_action.isChecked() != enabled:
@@ -777,11 +705,9 @@ class MainWindow(QMainWindow):
         scope, host, port = self.scope, self._mcp_host, self._mcp_port
 
         def job() -> Any:
-            server: Any = importlib.import_module(MCP_SERVER_MODULE)
-            try:
-                opts = server.ServerOptions(owner_kind="gui")
-            except TypeError:
-                opts = server.ServerOptions()
+            from edu09.mcp_server import server  # imported on first use (keeps startup fast)
+
+            opts = server.ServerOptions(owner_kind="gui")
             # publishes the URL in owner.json itself (scope.set_mcp_url); stop() clears it
             handle = server.start_http_in_thread(scope, opts, host=host, port=port)
             with self._mcp_lock:
@@ -804,12 +730,9 @@ class MainWindow(QMainWindow):
 
         def failed(exc: BaseException) -> None:
             self._mcp_starting = False
-            if isinstance(exc, ImportError):
-                self._disable_mcp(f"MCP server unavailable: {exc}")
-            else:
-                self.mcp_action.blockSignals(True)
-                self.mcp_action.setChecked(False)
-                self.mcp_action.blockSignals(False)
+            self.mcp_action.blockSignals(True)
+            self.mcp_action.setChecked(False)
+            self.mcp_action.blockSignals(False)
             self.notify(f"MCP server failed to start: {type(exc).__name__}: {exc}")
             self._update_labels()
 
@@ -914,7 +837,7 @@ class MainWindow(QMainWindow):
             return "quit"
         return "cancel"
 
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+    def closeEvent(self, event: QCloseEvent) -> None:
         if not self._shut_down and self._busy:
             what = self._busy_what or "background job"
             choice = self.confirm_close_while_busy(what)

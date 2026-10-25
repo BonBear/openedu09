@@ -97,12 +97,57 @@ def test_get_status(server: FastMCP, mcp_scope: Scope) -> None:
     assert st["simulated"] is True
     assert st["last_waveform_id"] is None
     assert st["calibration_source"] == "default"
+    assert st["calibrated"] is True and st["calibration_warning"] is None  # sim: model front end
     assert st["owner"]["kind"] == "mcp"
     assert isinstance(st["owner"]["pid"], int)
     assert st["settings"]["volts_per_div"] == 2.0
     assert st["settings"]["timebase_label"] == "2ms"
     mcp_scope.acquire()
     assert ok(server, "get_status")["last_waveform_id"] == "w1"
+
+
+class _HidLike:
+    """A SimTransport that claims to be hardware (no calibration file -> uncalibrated)."""
+
+    def __init__(self) -> None:
+        from edu09.transport.base import TransportInfo
+
+        self.inner = SimTransport.virtual(seed=0)
+        self.info = TransportInfo(kind="hid", path="/dev/fake-edu09")
+
+    def open(self) -> None:
+        self.inner.open()
+
+    def close(self) -> None:
+        self.inner.close()
+
+    def write(self, payload: bytes) -> None:
+        self.inner.write(payload)
+
+    def read(self, timeout_s: float) -> bytes | None:
+        return self.inner.read(timeout_s)
+
+
+def test_uncalibrated_hardware_status_and_acquire_warning(tmp_path: Any) -> None:
+    from edu09.device.scope import UNCALIBRATED_WARNING
+
+    scope = Scope.open(_HidLike(), lock_dir=tmp_path)  # type: ignore[arg-type]
+    try:
+        srv = build_server(scope, ServerOptions(export_dir=tmp_path))
+        st = ok(srv, "get_status")
+        assert st["calibration_source"] == "typical"
+        assert st["calibrated"] is False
+        assert st["calibration_warning"] == UNCALIBRATED_WARNING
+        assert "edu09-calibrate" in UNCALIBRATED_WARNING
+        out = ok(srv, "acquire", {"timeout_s": 5.0, "trigger_mode": "none"})
+        assert out["warnings"].count(UNCALIBRATED_WARNING) == 1
+    finally:
+        scope.close()
+
+
+def test_acquire_on_sim_has_no_calibration_warning(server: FastMCP) -> None:
+    out = ok(server, "acquire", {"trigger_mode": "none"})
+    assert not any("uncalibrated" in w for w in out["warnings"])
 
 
 def test_get_capabilities(server: FastMCP) -> None:
@@ -405,7 +450,6 @@ def test_list_waveforms_structured_content(server: FastMCP, mcp_scope: Scope) ->
 
 
 def test_auto_set_tool(server: FastMCP, mcp_scope: Scope) -> None:
-    pytest.importorskip("edu09.device.autoset")
     out = ok(server, "auto_set", {"timeout_s": 10.0})
     assert set(out) == {"settings", "rationale", "waveform_id"}
     assert out["rationale"] and all(isinstance(r, str) for r in out["rationale"])
@@ -418,13 +462,6 @@ def test_auto_set_tool(server: FastMCP, mcp_scope: Scope) -> None:
 
 def test_auto_set_timeout_validation(server: FastMCP) -> None:
     assert err(server, "auto_set", {"timeout_s": 0.1}).startswith("ValueError: timeout_s")
-
-
-def test_auto_set_missing_module(server: FastMCP, monkeypatch: pytest.MonkeyPatch) -> None:
-    import edu09.mcp_server.tools as tools
-
-    monkeypatch.setattr(tools, "AUTOSET_MODULE", "edu09.device._no_such_autoset")
-    assert err(server, "auto_set").startswith("NotImplemented: ")
 
 
 # --------------------------------------------------------------------------- calibrate

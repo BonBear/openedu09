@@ -215,7 +215,12 @@ def _open_scope(args: argparse.Namespace) -> Scope | None:
         except (DeviceNotFound, DeviceAccessError, TimeoutError, Edu09Error) as exc:
             hint = ""
             if isinstance(exc, DeviceAccessError) and sys.platform.startswith("linux"):
-                hint = "\n\nOn Linux install packaging/linux/99-velleman-edu09.rules (udev)."
+                hint = (
+                    "\n\nOn Linux install the udev rule packaging/linux/99-velleman-edu09.rules "
+                    "(packaging/linux/install-udev.sh installs it; download: "
+                    "https://github.com/BonBear/openedu09/blob/main/packaging/linux/"
+                    "99-velleman-edu09.rules), then replug."
+                )
             answer = QMessageBox.warning(
                 None,
                 "EDU09 not available",

@@ -25,7 +25,7 @@ from edu09.units import (
     volts_to_raw,
 )
 
-GAINS = {0.1: 0.987, 0.2: 0.975, 0.5: 0.974, 1.0: 0.996, 2.0: 0.981, 5.0: 0.979}
+GAINS = dict(tables.TYPICAL_RANGE_GAIN)  # one real unit's gains
 CAL_G = Calibration(range_gain=GAINS)
 
 
@@ -77,12 +77,12 @@ def test_gain_excluded_from_hash_but_compared() -> None:
 def test_dict_roundtrip_and_id_include_gain() -> None:
     d = json.loads(json.dumps(CAL_G.to_dict()))
     assert d["range_gain"] == {
-        "0.1": 0.987,
-        "0.2": 0.975,
-        "0.5": 0.974,
-        "1": 0.996,
-        "2": 0.981,
-        "5": 0.979,
+        "0.1": GAINS[0.1],
+        "0.2": GAINS[0.2],
+        "0.5": GAINS[0.5],
+        "1": GAINS[1.0],
+        "2": GAINS[2.0],
+        "5": GAINS[5.0],
     }
     assert "neg_nonlinearity" not in d
     back = Calibration.from_dict(d)
@@ -147,10 +147,15 @@ def test_with_range_gain_merges() -> None:
         cal.with_range_gain({1.0: 2.0})
 
 
-def test_typical_includes_measured_gains() -> None:
+def test_typical_has_no_gain_correction() -> None:
+    """Gains differ per unit: the hardware fallback applies none (one unit's table is only
+    documentation / simulator data / the wizard's ``--uncalibrated typical``)."""
     cal = Calibration.typical()
-    assert cal.range_gain == GAINS == tables.TYPICAL_RANGE_GAIN
-    assert cal.effective_counts_per_div(0.5) == pytest.approx(32.854, abs=1e-3)
+    assert cal.range_gain == {} and cal.range_gain_neg == {} and cal.neg_nonlinearity == {}
+    assert cal.effective_counts_per_div(0.5) == 32.0
+    assert Calibration(range_gain=GAINS).effective_counts_per_div(0.5) == pytest.approx(
+        32.854, abs=1e-3
+    )
 
 
 # -- conversions ------------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""T12: stdio <-> HTTP bridge to the device owner (architecture.md 3.4).
+"""stdio <-> HTTP bridge to the device owner (architecture.md 3.4).
 
 Every "owner" here is a sim Scope served by ``start_http_in_thread`` on a free loopback port,
 plus a real ``OwnerLock`` in a per-test lock dir. Nothing touches the real device or the default

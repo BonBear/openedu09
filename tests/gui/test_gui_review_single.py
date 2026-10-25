@@ -1,4 +1,4 @@
-"""Reviewer (T11): a pending Single (waiting for a trigger) must be cancellable from the GUI."""
+"""GUI review: a pending Single (waiting for a trigger) must be cancellable from the GUI."""
 
 from __future__ import annotations
 

@@ -18,6 +18,10 @@ from edu09.transport._hidlib import load_hid
 from edu09.transport.base import REPORT_SIZE, TransportInfo
 from edu09.transport.discovery import find_device
 
+UDEV_RULE_URL = (
+    "https://github.com/BonBear/openedu09/blob/main/packaging/linux/99-velleman-edu09.rules"
+)
+
 
 class HidTransport:
     def __init__(
@@ -60,7 +64,8 @@ class HidTransport:
             ):
                 hint = (
                     "no read/write permission; install the udev rule "
-                    "packaging/linux/99-velleman-edu09.rules and replug"
+                    f"packaging/linux/99-velleman-edu09.rules ({UDEV_RULE_URL}; "
+                    "packaging/linux/install-udev.sh installs it) and replug"
                 )
             raise DeviceAccessError(f"cannot open {dev_info.path}: {e} ({hint})") from e
         with contextlib.suppress(OSError, AttributeError):

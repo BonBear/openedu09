@@ -13,6 +13,7 @@ import pytest
 
 from edu09.calwizard.simref import SimReference
 from edu09.device import Scope
+from edu09.protocol import tables
 from edu09.transport.replay import RecordingTransport, ReplayTransport
 from edu09.transport.sim import PHYSICAL_UNITS, UNIT1, SignalSpec, SimTransport
 from edu09.units import Calibration, volts_to_deflection
@@ -44,6 +45,22 @@ def test_physical_units_registry() -> None:
     assert PHYSICAL_UNITS["unit1"] is UNIT1
     assert UNIT1.base_ofs == Calibration.typical().base_ofs
     assert UNIT1.gnd_fit == Calibration.typical().gnd_fit
+
+
+def test_unit1_gains_match_the_typical_gain_table() -> None:
+    """``tables.TYPICAL_RANGE_GAIN`` (rounded, documentation / ``--uncalibrated typical``) and the
+    simulator's UNIT1 positive gains describe the same measured unit."""
+    assert tables.TYPICAL_RANGE_GAIN == {
+        0.1: 0.987,
+        0.2: 0.975,
+        0.5: 0.974,
+        1.0: 0.996,
+        2.0: 0.981,
+        5.0: 0.979,
+    }
+    assert UNIT1.range_gain.keys() == tables.TYPICAL_RANGE_GAIN.keys()
+    for vdiv, g in tables.TYPICAL_RANGE_GAIN.items():
+        assert UNIT1.range_gain[vdiv] == pytest.approx(g, abs=1e-3), vdiv
 
 
 def test_unit1_model_matches_sweep_positive() -> None:
@@ -162,7 +179,6 @@ def test_sim_reference_for_scope(tmp_path: Path) -> None:
     assert wrapped is not None and wrapped.device is t.device
     assert SimReference.for_scope(SimpleNamespace(transport=ReplayTransport([]))) is None
     assert SimReference.for_scope(object()) is None
-    if isinstance(getattr(Scope, "transport", None), property):  # Task B's Scope.transport
-        with Scope.open(SimTransport.virtual()) as sc:
-            real = SimReference.for_scope(sc)
-            assert real is not None
+    with Scope.open(SimTransport.virtual()) as sc:
+        real = SimReference.for_scope(sc)
+        assert real is not None

@@ -1,4 +1,4 @@
-"""Auto set (task T9; architecture.md 6 ``auto_set``): pick V/div, position, timebase and trigger.
+"""Auto set (architecture.md 6 ``auto_set``): pick V/div, position, timebase and trigger.
 
 Uses only the public ``Scope`` API (``configure``/``set_settings``/``acquire``) and pure helpers
 (``analysis``, ``tables``). Algorithm:

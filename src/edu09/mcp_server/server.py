@@ -1,6 +1,6 @@
 """Build and run the edu09 MCP server (architecture.md 3.4 and 6).
 
-Public API (stable; used by the CLI, the GUI (T11) and the bridge (T12))::
+Public API (stable; used by the CLI, the GUI and the bridge)::
 
     build_server(scope, opts=None) -> FastMCP
     run_stdio(scope, opts=None) -> None                         # blocks

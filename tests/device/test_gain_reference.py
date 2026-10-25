@@ -14,9 +14,10 @@ from edu09.device import Scope, measure_calibration
 from edu09.device import calibration as calmod
 from edu09.errors import CalibrationError
 from edu09.model import ChannelSettings, VoltsPerDiv
+from edu09.protocol import tables
 from edu09.transport.sim import SignalSpec, SimTransport
 
-GAINS = {0.1: 0.987, 0.2: 0.975, 0.5: 0.974, 1.0: 0.996, 2.0: 0.981, 5.0: 0.979}
+GAINS = dict(tables.TYPICAL_RANGE_GAIN)  # one real unit's gains
 # physical front end: offsets like the default model, but reads high by 1/g like the real unit
 PHYSICAL = units.Calibration(range_gain=GAINS)
 

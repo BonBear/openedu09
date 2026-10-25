@@ -1,4 +1,4 @@
-"""Reviewer (T11) additions: threading, real MCP server in the GUI, drag mapping, shutdown."""
+"""GUI review additions: threading, real MCP server in the GUI, drag mapping, shutdown."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_no_blocking_scope_call_on_gui_thread(
 
         monkeypatch.setattr(vscope, name, spy)
 
-    for n in ("configure", "run", "stop", "acquire", "calibrate"):
+    for n in ("configure", "set_settings", "run", "stop", "acquire"):
         wrap(n)
     win = make_window(qtbot, vscope)
     try:
@@ -48,11 +48,10 @@ def test_no_blocking_scope_call_on_gui_thread(
         win.controls.position.setValue(1.0)
         win.controls.runRequested.emit()
         win.controls.stopRequested.emit()
-        win.confirm_calibration = lambda: True  # type: ignore[method-assign]
-        win.calibrate()
+        win.auto_set()  # background job: set_settings + acquire on the adapter's pool
         qtbot.waitUntil(lambda: not win._busy, timeout=WAIT_MS * 3)
         _drain(qtbot, win)
-        assert {"configure", "run", "stop"} <= set(seen)
+        assert {"configure", "run", "stop", "set_settings", "acquire"} <= set(seen)
         for name, thread in seen.items():
             assert thread is not main, name
     finally:
