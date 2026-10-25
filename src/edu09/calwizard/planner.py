@@ -54,6 +54,7 @@ from edu09.model import VoltsPerDiv
 __all__ = [
     "ADJUSTABLE_MARGIN",
     "DIVIDER_HINT",
+    "TRIMMER_MODEL_GROUND_NOTE",
     "accept_interval",
     "level_ok",
     "parse_source",
@@ -72,6 +73,10 @@ EST_S_PER_ACTION: Final = 30.0
 EST_S_PER_POINT: Final = 0.8
 EST_S_ZERO: Final = 15.0
 EST_S_PER_GROUND_POINT: Final = 0.5
+TRIMMER_MODEL_GROUND_NOTE: Final = (
+    "Note: no ground level is measured before this step, so the readout uses the modelled "
+    "ground (can be off by about 1 count, ~1 % at 3 div); the gain steps correct the rest."
+)
 DIVIDER_HINT: Final = (
     "or divide a larger source with two resistors (well below the scope's "
     f"{INPUT_IMPEDANCE_OHM / 1e3:g} kOhm input impedance, e.g. 1-10 kOhm); only the multimeter "
@@ -725,8 +730,20 @@ def plan_calibration(sources: Sequence[Source], options: PlanOptions | None = No
                 if pv is not None:
                     verify.append(pv)
 
+    trim: list[Setup] = []
+    if opts.trimmer.enabled:
+        ts = _trimmer_setup(srcs, opts, warnings)
+        if opts.trimmer.placement == "first" or not opts.zero:
+            ts = _replace(
+                ts,
+                instruction=f"{ts.instruction} {TRIMMER_MODEL_GROUND_NOTE}",
+            )
+        trim.append(ts)
+    # the ground map: every (range, position) measured later, including an after_zero trimmer
+    # (its live readout then uses the measured ground, like the gain steps)
+    mapped = (*refs, *verify, *(trim if opts.trimmer.placement == "after_zero" else ()))
     ground_pts = sorted(
-        {(p.vdiv, p.position_div) for s in (*refs, *verify) for p in s.points},
+        {(p.vdiv, p.position_div) for s in mapped for p in s.points},
         key=lambda x: (-x[0], x[1]),
     )
     zero: list[Setup] = []
@@ -745,9 +762,6 @@ def plan_calibration(sources: Sequence[Source], options: PlanOptions | None = No
                 None,
             )
         )
-    trim: list[Setup] = []
-    if opts.trimmer.enabled:
-        trim.append(_trimmer_setup(srcs, opts, warnings))
     if opts.trimmer.placement == "first":
         ordered = [*trim, *zero, *refs, *verify]
     else:

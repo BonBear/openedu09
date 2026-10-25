@@ -171,7 +171,7 @@ Positions are quantised to 0.25 div:
    - `trimmer` (if enabled, placement `first`), then `zero`, then (`after_zero` trimmer).
    - Then `reference` setups grouped by source in the user's order. Within a source: positive ascending `|V|`, then one lead swap, then negative descending `|V|`.
    - Then `verify`: same source/polarity as the last reference setup, so no reconnection. Up to 3 ranges with nominal `|d|` in 1.5-6.5, at positions shifted by 1 div from the fit positions, so the position-to-DAC path is exercised.
-   - The zero step's `points` = every distinct (vdiv, position) used by reference and verify setups (the ground map).
+   - The zero step's `points` = every distinct (vdiv, position) used by reference and verify setups, plus the trimmer's point when the trimmer is placed `after_zero` (the ground map).
 6. **Each reference setup gets `accept_v`**: the signed reading interval for which all its points stay inside their *accepted* windows and position limits. Adjustable setups must allow at least +-8 % around the target, otherwise the planner drops the colliding point to its own setup.
 7. **Coverage report**, per range:
    - `pos`, `neg`: `good|fallback|missing|not_reversible`.
@@ -257,8 +257,9 @@ Every measurement is one `scope.run_exclusive(fn, abort_event=ev)` per setup: on
   - **Nothing is installed on the scope before `save()`**, so abort never needs to restore anything.
 - **Trimmer**:
   - Measures with the *installed* calibration and the full path (`counts_to_volts` mean), 1 frame per sample.
-  - `TrimmerReading{v_meas, v_ref, dev_v, dev_pct, raw_mean, noise_counts, best_abs_dev_pct, trend: better|worse|same, n}`. `dev_pct` is relative to `v_ref`, or to `vdiv` for `reference="open"`.
-  - Every sample is appended to the session log, so the trimmer's real purpose can be learned from logs.
+  - `TrimmerReading{v_meas, v_ref, dev_v, dev_pct, raw_mean, noise_counts, best_abs_dev_pct, trend: better|worse|same, n, ground_source}`. `dev_pct` is relative to `v_ref`, or to `vdiv` for `reference="open"`.
+  - The readout is `(mean - ground) * s * vdiv / counts_per_div` (gain 1, no NL) with the ground the zero step measured at the trimmer's exact (range, DAC) (`ground_source="map"`, consistent with the gain steps). Trimmer `first` or zero skipped: model ground (`"model"`, ~1 count = ~1 % at 3 div), stated in the instruction, the submit result and `SetupView.trimmer_ground_source`.
+  - Session log: `trimmer_samples` = last 50 samples at full rate; `trimmer.history` = downsampled whole trimming (compact rows `t,n,dev_pct,v_meas,v_ref,raw_mean,noise_counts,best_abs_dev_pct`: each run's first sample, at most one per 0.5 s, and every best-deviation improvement; capped at 600 by dropping every second row and doubling the interval); `trimmer.runs` = per-run summary (initial/final/best deviation, duration, ground source).
 - **Verify**: after `save` (the new calibration is installed). Measures through the installed calibration with *model* ground (no map). This is an independent check of the stored calibration and the position-to-DAC mapping.
 
 ### 3.4 Checks and quality codes
@@ -328,7 +329,7 @@ Points are classified by the true deflection `d = v_ref/vdiv`, not by the planne
 - Verify criterion per point: `|v_scope - v_ref| <= 0.005*|v_ref| + 0.05*vdiv`. Result `pass|fail` with errors in %. On failure, offer `revert()` or re-running the wizard.
 - **Resuming an in-progress session: no.** A run takes about 10-20 min. Points depend on the zero step, the ground map and the thermal state taken in the same sitting. A resumed half-session would mix stale data, and resuming would double the state surface. Instead:
   - the source profile is persisted (2.3);
-  - a **session log** is written at every terminal state (`DONE`, `ABORTED`, `FAILED`) to `storage.default_data_dir()/calibration-sessions/<stamp>.json`. It holds the plan, every point (raw mean, std, DAC, ground, readings), the fit, verify and trimmer samples. Size is 64 KiB or less; the newest 20 are kept. Its path is returned in `summary()`. It contains no secrets.
+  - a **session log** is written at every terminal state (`DONE`, `ABORTED`, `FAILED`) to `storage.default_data_dir()/calibration-sessions/<stamp>.json`. It holds the plan, every point (raw mean, std, DAC, ground, readings), the fit, verify and trimmer samples. Size is 128 KiB or less (detail is dropped in levels to fit); the newest 20 are kept. Its path is returned in `summary()`. It contains no secrets.
 
 ### 3.7 Simulator reference (`src/edu09/calwizard/simref.py`)
 ```python

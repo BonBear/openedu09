@@ -16,11 +16,12 @@ Measurements run as one ``Scope.run_exclusive`` job per setup with the session's
 the live view pauses once per setup and :meth:`~CalibrationSession.abort` (any thread,
 non-blocking) ends a running job at its next device call (``JobAborted``). Nothing is installed
 on the scope before :meth:`~CalibrationSession.save`. Every terminal state writes a session log
-(``<data dir>/calibration-sessions/<stamp>.json``, at most 64 KiB, newest 20 kept).
+(``<data dir>/calibration-sessions/<stamp>.json``, at most 128 KiB, newest 20 kept).
 """
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import dataclasses
 import json
@@ -98,11 +99,32 @@ VERIFY_DIV: Final = 0.05
 MAX_READING_V: Final = tables.INPUT_ABS_MAX_V
 TRIMMER_SAME_PCT: Final = 0.05
 """Trimmer trend: changes of |deviation| below this (percentage points) count as "same"."""
-MAX_TRIMMER_SAMPLES: Final = 2000
+TRIMMER_TAIL: Final = 50
+"""The session log keeps the last this many trimmer samples at full rate..."""
+TRIMMER_HIST_INTERVAL_S: Final = 0.5
+TRIMMER_HIST_MAX: Final = 600
+"""...plus a downsampled history of the whole trimming: each run's first sample, then at most
+one sample per ``TRIMMER_HIST_INTERVAL_S`` and every sample that improved the best deviation.
+Beyond ``TRIMMER_HIST_MAX`` rows every second row is dropped and the interval doubled."""
+TRIMMER_HIST_FIELDS: Final = (
+    "t",
+    "n",
+    "dev_pct",
+    "v_meas",
+    "v_ref",
+    "raw_mean",
+    "noise_counts",
+    "best_abs_dev_pct",
+)
 LOG_DIRNAME: Final = "calibration-sessions"
 LOG_KEEP: Final = 20
-LOG_MAX_BYTES: Final = 64 * 1024
+LOG_MAX_BYTES: Final = 128 * 1024
 TOOL_NAME: Final = "edu09-calibrate"
+TRIMMER_MODEL_GROUND_MSG: Final = (
+    "no ground measured at this range/position (no zero step before the trimmer): the readout "
+    "uses the modelled ground and can be off by about 1 %"
+)
+_TRIM_RUNS_KEEP: Final = 20
 _JOB_BASE_TIMEOUT_S: Final = 60.0
 _JOB_PER_POINT_S: Final = 5.0
 
@@ -170,8 +192,14 @@ class CalibrationSession:
         self._apply_only = False
         self._reverted: SaveResult | None = None
         self._trim_vref: float | None = None
-        self._trim: list[TrimmerReading] = []
-        self._trim_log: list[dict[str, Any]] = []
+        self._trim_gsrc: Literal["map", "model"] | None = None
+        self._trim_last: TrimmerReading | None = None  # current live run
+        self._trim_run: dict[str, Any] | None = None  # current run's summary
+        self._trim_runs: list[dict[str, Any]] = []  # finished / abandoned runs' summaries
+        self._trim_tail: collections.deque[dict[str, Any]] = collections.deque(maxlen=TRIMMER_TAIL)
+        self._trim_hist: list[list[float]] = []
+        self._trim_hist_dt = TRIMMER_HIST_INTERVAL_S
+        self._trim_hist_t: float | None = None
         self._warnings: list[str] = []
         self._t0 = clock()
         self._created = datetime.now(UTC)
@@ -250,6 +278,7 @@ class CalibrationSession:
                 warnings=tuple(self._warnings),
                 busy=self._oplock.locked(),
                 trimmer_v_ref=self._trim_vref,
+                trimmer_ground_source=self._trim_gsrc if s is not None else None,
             )
 
     # -- op guard ----------------------------------------------------------------------------
@@ -345,7 +374,8 @@ class CalibrationSession:
         setups = self.plan.setups
         self._sim_reading = None
         self._trim_vref = None
-        self._trim = []
+        self._trim_gsrc = None
+        self._end_trim_run()
         if self._state is SessionState.IN_SETUP and (
             i >= len(setups) or setups[i].kind == "verify"
         ):
@@ -362,9 +392,11 @@ class CalibrationSession:
         self._index = i
         s = setups[i]
         self._phase = SetupPhase.AWAIT_INPUT
-        if s.kind == "trimmer" and s.volts is None:
-            self._phase = SetupPhase.LIVE
-            self._trim_vref = 0.0
+        if s.kind == "trimmer":
+            self._trim_gsrc = "map" if self._trimmer_ground(s)[1] is not None else "model"
+            if s.volts is None:
+                self._phase = SetupPhase.LIVE
+                self._trim_vref = 0.0
         if self._sim is not None:
             if s.kind == "zero" or s.volts is None:
                 self._sim.disconnect()
@@ -569,14 +601,17 @@ class CalibrationSession:
                 with self._lock:
                     self._check_abort()
                     self._trim_vref = v_ref
-                    self._trim = []
+                    self._end_trim_run()
                     self._phase = SetupPhase.LIVE
+                    if self._trim_gsrc == "model":
+                        notes.append(TRIMMER_MODEL_GROUND_MSG)
                     res = SetupResult(
                         s.id,
                         "trimmer",
                         "ok",
                         messages=(*notes, "adjust the trimmer; press Done when finished"),
                         reading_v=v_ref,
+                        extra={"ground_source": self._trim_gsrc},
                     )
                     self._last_result = res
                 return res
@@ -885,50 +920,126 @@ class CalibrationSession:
         ), True
 
     # -- trimmer ------------------------------------------------------------------------------
+    def _trimmer_ground(self, s: Setup) -> tuple[ChannelSettings, float | None]:
+        """Trimmer channel and the ground measured there in the zero step (None: not mapped)."""
+        p = s.points[0]
+        ch = self._ch(p.vdiv, p.position_div)
+        dac = units.offset_dac(ch, self._meas_cal())
+        return ch, self._ground_map.get((p.vdiv, dac))
+
     def trimmer_sample(self) -> TrimmerReading:
-        """One live trimmer reading (~0.25 s): DC mean through the session's offsets (zero step,
-        else the installed calibration) without gain correction, against the typed reference."""
+        """One live trimmer reading (~0.25 s): DC deflection through the session's offsets (zero
+        step, else the installed calibration) without gain correction, against the typed
+        reference. The deflection is taken from the ground the zero step measured at this exact
+        range/offset DAC (as the gain steps do); without one, from the modelled ground."""
         with self._op(SessionState.IN_SETUP):
             with self._lock:
                 s = self._require_setup("trimmer")
                 if self._phase is not SetupPhase.LIVE or self._trim_vref is None:
                     raise CalibrationError("the trimmer step is not in its live phase")
                 v_ref = self._trim_vref
-            p = s.points[0]
-            # offsets of the zero step (or the installed ones), gain 1: shows RV1's raw gain
-            # error, which is what the trimmer adjusts (the gain steps follow it)
-            cal = self._meas_cal()
-            ch = self._ch(p.vdiv, p.position_div)
+                p = s.points[0]
+                # offsets of the zero step (or the installed ones), gain 1: shows RV1's raw gain
+                # error, which is what the trimmer adjusts (the gain steps follow it)
+                cal = self._meas_cal()
+                ch, g_map = self._trimmer_ground(s)
 
-            def job(io: DeviceIO) -> tuple[float, float, float]:
+            def job(io: DeviceIO) -> tuple[float, float]:
                 x = devcal.capture_window(io, ch, cal, TRIMMER_FRAMES)
-                return (
-                    float(np.mean(units.counts_to_volts(x, ch, cal))),
-                    float(x.mean()),
-                    float(np.std(x)),
-                )
+                return float(x.mean()), float(np.std(x))
 
-            v_meas, raw_mean, noise = self._job(job, 1)
+            raw_mean, noise = self._job(job, 1)
+            src: Literal["map", "model"] = "map"
+            g = g_map
+            if g is None:
+                g, src = float(units.gnd_counts(ch, cal)), "model"
+            sadc = -1.0 if cal.adc_inverted else 1.0
+            v_meas = (raw_mean - g) * sadc * p.vdiv / cal.counts_per_div
             with self._lock:
                 self._check_abort()
-                dev = v_meas - v_ref
-                dev_pct = 100.0 * dev / (abs(v_ref) if v_ref != 0 else p.vdiv)
-                prev = self._trim[-1] if self._trim else None
-                best = min([abs(dev_pct), *(abs(t.dev_pct) for t in self._trim)])
-                trend: Literal["better", "worse", "same"] = "same"
-                if prev is not None:
-                    delta = abs(dev_pct) - abs(prev.dev_pct)
-                    if delta < -TRIMMER_SAME_PCT:
-                        trend = "better"
-                    elif delta > TRIMMER_SAME_PCT:
-                        trend = "worse"
-                tr = TrimmerReading(
-                    v_meas, v_ref, dev, dev_pct, raw_mean, noise, best, trend, len(self._trim) + 1
-                )
-                if len(self._trim) < MAX_TRIMMER_SAMPLES:
-                    self._trim.append(tr)
-                    self._trim_log.append({"t": round(self._clock() - self._t0, 3), **tr.to_dict()})
-            return tr
+                return self._record_trim(s, v_meas, v_ref, raw_mean, noise, src, p.vdiv)
+
+    def _record_trim(
+        self,
+        s: Setup,
+        v_meas: float,
+        v_ref: float,
+        raw_mean: float,
+        noise: float,
+        src: Literal["map", "model"],
+        vdiv: float,
+    ) -> TrimmerReading:
+        """Build the reading and log it (tail, downsampled history, run summary). Holds _lock."""
+        dev = v_meas - v_ref
+        dev_pct = 100.0 * dev / (abs(v_ref) if v_ref != 0 else vdiv)
+        prev = self._trim_last
+        improved = prev is None or abs(dev_pct) < prev.best_abs_dev_pct
+        best = abs(dev_pct) if prev is None else min(prev.best_abs_dev_pct, abs(dev_pct))
+        trend: Literal["better", "worse", "same"] = "same"
+        if prev is not None:
+            delta = abs(dev_pct) - abs(prev.dev_pct)
+            if delta < -TRIMMER_SAME_PCT:
+                trend = "better"
+            elif delta > TRIMMER_SAME_PCT:
+                trend = "worse"
+        n = 1 if prev is None else prev.n + 1
+        tr = TrimmerReading(v_meas, v_ref, dev, dev_pct, raw_mean, noise, best, trend, n, src)
+        self._trim_last = tr
+        t = round(self._clock() - self._t0, 3)
+        self._trim_tail.append({"t": t, **tr.to_dict()})
+        run = self._trim_run
+        if run is None or n == 1:
+            run = self._trim_run = {
+                "setup_id": s.id,
+                "ground_source": src,
+                "v_ref": round(v_ref, 5),
+                "t_start": t,
+                "initial_dev_pct": round(dev_pct, 4),
+            }
+        run.update(
+            samples=n,
+            t_end=t,
+            duration_s=round(t - run["t_start"], 3),
+            final_dev_pct=round(dev_pct, 4),
+            final_v_meas=round(v_meas, 5),
+        )
+        if improved:
+            run.update(
+                best_abs_dev_pct=round(best, 4),
+                best_dev_pct=round(dev_pct, 4),
+                best_n=n,
+                best_t=t,
+            )
+        h = self._trim_hist_t
+        if n == 1 or improved or h is None or t - h >= self._trim_hist_dt - 1e-9:
+            self._trim_hist.append(
+                [
+                    t,
+                    n,
+                    round(dev_pct, 4),
+                    round(v_meas, 5),
+                    round(v_ref, 5),
+                    round(raw_mean, 3),
+                    round(noise, 3),
+                    round(best, 4),
+                ]
+            )
+            self._trim_hist_t = t
+            if len(self._trim_hist) > TRIMMER_HIST_MAX:
+                # drop every second row (run starts stay) and halve the rate from now on
+                self._trim_hist = [
+                    r for i, r in enumerate(self._trim_hist) if i % 2 == 0 or r[1] == 1
+                ]
+                self._trim_hist_dt *= 2
+        return tr
+
+    def _end_trim_run(self) -> None:
+        """Close the current trimmer run (its summary stays in the log). Holds _lock."""
+        if self._trim_run is not None:
+            self._trim_runs.append(self._trim_run)
+            del self._trim_runs[:-_TRIM_RUNS_KEEP]
+        self._trim_run = None
+        self._trim_last = None
 
     def trimmer_done(self) -> SetupView:
         """Finish the trimmer step's live phase and advance."""
@@ -936,16 +1047,26 @@ class CalibrationSession:
             s = self._require_setup("trimmer")
             if self._phase is not SetupPhase.LIVE:
                 raise CalibrationError("the trimmer step is not in its live phase")
-            last = self._trim[-1] if self._trim else None
-            extra: dict[str, Any] = {"samples": len(self._trim)}
+            last = self._trim_last
+            run = self._trim_run
+            extra: dict[str, Any] = {
+                "samples": 0 if last is None else last.n,
+                "ground_source": self._trim_gsrc,
+            }
             msgs: list[str] = []
-            if last is not None:
+            if last is not None and run is not None:
                 extra.update(
                     last_dev_pct=round(last.dev_pct, 4),
                     best_abs_dev_pct=round(last.best_abs_dev_pct, 4),
                     v_meas=round(last.v_meas, 5),
+                    initial_dev_pct=run["initial_dev_pct"],
+                    duration_s=run["duration_s"],
                 )
-                msgs.append(f"trimmer done: last deviation {last.dev_pct:+.2f} %")
+                msgs.append(
+                    f"trimmer done: deviation {run['initial_dev_pct']:+.2f} % -> "
+                    f"{last.dev_pct:+.2f} % (best {last.best_abs_dev_pct:.2f} %, "
+                    f"{run['duration_s']:.0f} s)"
+                )
             self._complete(
                 SetupResult(s.id, "trimmer", "ok", (), tuple(msgs), self._trim_vref, extra)
             )
@@ -1151,9 +1272,25 @@ class CalibrationSession:
             "fit": None if self._fit is None else self._fit.to_dict(),
             "saved": None if self._saved is None else self._saved.to_dict(),
             "reverted": None if self._reverted is None else self._reverted.to_dict(),
-            "trimmer_samples": self._trim_log if level == 0 else self._trim_log[-50:],
+            "trimmer": self._trim_doc(level),
+            "trimmer_samples": list(self._trim_tail)[-_TAIL_BY_LEVEL[level] :],
         }
         return doc
+
+    def _trim_doc(self, level: int) -> dict[str, Any] | None:
+        """Trimmer runs (start/end summaries) and the downsampled history of the whole
+        trimming; lower detail at higher ``level``."""
+        runs = [*self._trim_runs, *([self._trim_run] if self._trim_run is not None else [])]
+        if not runs and not self._trim_hist:
+            return None
+        return {
+            "runs": [dict(r) for r in runs],
+            "history": {
+                "fields": list(TRIMMER_HIST_FIELDS),
+                "interval_s": self._trim_hist_dt,
+                "rows": _thin(self._trim_hist, _HIST_BY_LEVEL[level]),
+            },
+        }
 
     def _write_log(self) -> None:
         d = storage.default_data_dir() / LOG_DIRNAME
@@ -1162,7 +1299,7 @@ class CalibrationSession:
             self._log_path = d / f"{stamp}.json"
         text = ""
         for level in range(4):
-            text = json.dumps(self._log_doc(level), indent=1, default=str)
+            text = _dumps_log(self._log_doc(level))
             if len(text.encode()) <= LOG_MAX_BYTES:
                 break
         else:
@@ -1171,6 +1308,31 @@ class CalibrationSession:
             text = json.dumps(doc, default=str)[:LOG_MAX_BYTES]
         storage._atomic_write_text(self._log_path, text + "\n")
         _prune_logs(d, LOG_KEEP)
+
+
+_TAIL_BY_LEVEL: Final = (TRIMMER_TAIL, TRIMMER_TAIL, 20, 10)
+_HIST_BY_LEVEL: Final = (TRIMMER_HIST_MAX, 200, 200, 50)
+_ROWS_SENTINEL: Final = "@@trimmer-history-rows@@"
+
+
+def _thin(rows: list[list[float]], k: int) -> list[list[float]]:
+    """At most ``k`` rows, evenly spaced, first and last kept."""
+    if len(rows) <= k:
+        return list(rows)
+    idx = sorted({round(i * (len(rows) - 1) / (k - 1)) for i in range(k)})
+    return [rows[i] for i in idx]
+
+
+def _dumps_log(doc: dict[str, Any]) -> str:
+    """``json.dumps(indent=1)`` with the trimmer history rows one compact row per line."""
+    hist = (doc.get("trimmer") or {}).get("history")
+    if not hist:
+        return json.dumps(doc, indent=1, default=str)
+    rows = hist["rows"]
+    doc = {**doc, "trimmer": {**doc["trimmer"], "history": {**hist, "rows": _ROWS_SENTINEL}}}
+    text = json.dumps(doc, indent=1, default=str)
+    body = ",\n".join(json.dumps(r, separators=(",", ":")) for r in rows)
+    return text.replace(f'"{_ROWS_SENTINEL}"', f"[\n{body}\n]" if rows else "[]", 1)
 
 
 def _prune_logs(d: Path, keep: int) -> None:

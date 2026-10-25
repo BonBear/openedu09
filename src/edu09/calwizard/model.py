@@ -686,6 +686,9 @@ class TrimmerReading:
     best_abs_dev_pct: float
     trend: Literal["better", "worse", "same"]
     n: int
+    ground_source: Literal["map", "model"] = "model"
+    """``"map"``: deflection relative to the ground measured in the zero step at this exact
+    range/offset DAC; ``"model"``: the modelled ground (no zero step before the trimmer)."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -698,6 +701,7 @@ class TrimmerReading:
             "best_abs_dev_pct": _r4(self.best_abs_dev_pct),
             "trend": self.trend,
             "n": self.n,
+            "ground_source": self.ground_source,
         }
 
 
@@ -717,6 +721,8 @@ class SetupView:
     warnings: tuple[str, ...] = ()
     busy: bool = False
     trimmer_v_ref: float | None = None
+    trimmer_ground_source: Literal["map", "model"] | None = None
+    """Trimmer setup only: the ground its live readout uses (see ``TrimmerReading``)."""
 
     def to_dict(self) -> dict[str, Any]:
         s = self.setup
@@ -745,6 +751,7 @@ class SetupView:
             "sim_reading_v": self.sim_reading_v,
             "warnings": list(self.warnings),
             "busy": self.busy,
+            "ground_source": self.trimmer_ground_source,
         }
 
 

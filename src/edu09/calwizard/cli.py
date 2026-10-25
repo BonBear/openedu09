@@ -271,6 +271,7 @@ def _trimmer_live(session: Any, ask: Callable[[str], str], out: IO[str], yes: bo
         out.write(
             f"\r  scope {tr.v_meas:+.4f} V  ref {tr.v_ref:+.4f} V  dev {tr.dev_v * 1e3:+7.1f} mV "
             f"{tr.dev_pct:+6.2f} %  best {tr.best_abs_dev_pct:.2f} %  {tr.trend:<6}"
+            + ("  (model ground)" if getattr(tr, "ground_source", "map") == "model" else "")
         )
         out.flush()
         if yes and n >= YES_TRIMMER_SAMPLES:

@@ -721,6 +721,7 @@ class StepPage(QWizardPage):
             f"reference {r.v_ref:.4f} V   deviation {r.dev_v * 1e3:+.1f} mV "
             f"({r.dev_pct:+.2f} %)   best {r.best_abs_dev_pct:.2f} %   {arrow}   "
             f"noise {r.noise_counts:.1f} counts"
+            + ("   (model ground)" if getattr(r, "ground_source", "map") == "model" else "")
         )
 
     def trimmer_done(self) -> None:
