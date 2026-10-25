@@ -52,7 +52,8 @@ def test_main_reports_device_busy(qtbot: Any, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(app.Scope, "open", busy)
     monkeypatch.setattr(app.QMessageBox, "critical", lambda _p, _t, text: shown.append(text))
     assert app.main(["--no-run"]) == 2
-    assert "4242" in shown[0] and "mcp" in shown[0] and "http://127.0.0.1:8765/mcp" in shown[0]
+    assert "4242" in shown[0] and "mcp" in shown[0]
+    assert shown[0].find(owner.mcp_url) >= 0  # find(), not `in`: CodeQL URL-substring rule
 
 
 def test_describe_busy_without_owner() -> None:

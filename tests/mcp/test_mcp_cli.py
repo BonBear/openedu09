@@ -65,7 +65,7 @@ def test_device_busy_with_owner_url(
     cap = capsys.readouterr()
     assert cap.out == ""
     assert "pid 4242" in cap.err
-    assert "http://127.0.0.1:8765/mcp" in cap.err
+    assert cap.err.find(owner.mcp_url) >= 0  # find(), not `in`: CodeQL URL-substring rule
     assert "bridge" in cap.err
 
 

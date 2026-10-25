@@ -55,11 +55,25 @@ def test_remote_bind_is_restricted() -> None:
         "[::2]:8765",
         "box:*",
     ]
-    assert "http://scope.lan:8765" in sec.allowed_origins
-    assert "0.0.0.0:8765" not in sec.allowed_hosts
+    # full-list comparisons (no substring/membership checks on URLs; CodeQL
+    # py/incomplete-url-substring-sanitization); the wildcard bind host itself is not listed
+    assert sec.allowed_origins == [
+        "http://127.0.0.1:8765",
+        "http://localhost:8765",
+        "http://[::1]:8765",
+        "http://scope.lan:8765",
+        "http://10.0.0.5:9000",
+        "http://[fe80::1]:8765",
+        "http://[::2]:8765",
+        "http://box:*",
+    ]
     sec = transport_security("192.168.1.10", 8765)
-    assert "192.168.1.10:8765" in sec.allowed_hosts
-    assert "evil.example.com:8765" not in sec.allowed_hosts
+    assert sec.allowed_hosts == [
+        "127.0.0.1:8765",
+        "localhost:8765",
+        "[::1]:8765",
+        "192.168.1.10:8765",
+    ]
     assert transport_security("192.168.1.10", 0).allowed_hosts[-1] == "192.168.1.10:*"
 
 

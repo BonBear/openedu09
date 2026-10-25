@@ -338,7 +338,7 @@ if mode == "running":
 elif mode == "armed":
     sim.device.never_trigger = True
     s.configure(trigger_mode="normal")
-    s.acquire_async(timeout_s=60)
+    s.acquire_async(timeout_s=1e6)  # simulated s: must stay armed (VirtualClock runs fast)
     while sim.device.state != "armed":
         time.sleep(0.001)
 elif mode == "disconnected":
@@ -500,7 +500,7 @@ def test_stop_then_acquire_has_no_post_stop_zeros(delay_s: float) -> None:
     sim.device.never_trigger = True
     with Scope.open(LateStopReport(sim, delay_s), reconnect_interval_s=0.01) as scope:
         scope.configure(timebase="200us", trigger_mode="normal", volts_per_div=1)
-        fut = scope.acquire_async(timeout_s=60)
+        fut = scope.acquire_async(timeout_s=1e6)  # simulated s: stays armed until stop()
         wait_until(lambda: sim.device.state == "armed", what="armed")
         scope.stop()
         with pytest.raises(Cancelled):

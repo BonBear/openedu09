@@ -45,7 +45,6 @@ Nothing here writes to stdout except the MCP protocol itself (stdio transport).
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import os
 import time
@@ -66,6 +65,7 @@ from mcp.shared.exceptions import MCPError
 
 from edu09 import __version__
 from edu09.device.lock import OwnerInfo, read_owner
+from edu09.mcp_server.netaddr import is_loopback_ip
 
 __all__ = [
     "OWNER_GONE",
@@ -171,8 +171,10 @@ class UpstreamInfo:
 def check_owner_url(url: str) -> str:
     """Return ``url`` if it is ``http(s)://<loopback>[:port]/...``; else raise ``ValueError``.
 
-    Loopback = an IP literal in 127.0.0.0/8 or ::1, or ``localhost``. User info in the URL
-    (``http://user@...``) is refused too.
+    Loopback = an IP literal in 127.0.0.0/8 or exactly ::1, or ``localhost``. IPv6 forms that
+    embed an IPv4 address (``::ffff:127.0.0.1``, ``::127.0.0.1``, 6to4, ...) and scoped
+    addresses are refused on every Python version (:mod:`edu09.mcp_server.netaddr`). User info
+    in the URL (``http://user@...``) is refused too.
     """
     try:
         parts = urlsplit(url)
@@ -186,16 +188,11 @@ def check_owner_url(url: str) -> str:
         raise ValueError(f"refusing MCP URL {url!r}: user info is not allowed")
     if not host:
         raise ValueError(f"refusing MCP URL {url!r}: no host")
-    if host.lower() != "localhost":
-        try:
-            loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            loopback = False
-        if not loopback:
-            raise ValueError(
-                f"refusing MCP URL {url!r}: the bridge only connects to loopback addresses "
-                "(127.0.0.1, ::1, localhost)"
-            )
+    if host.lower() != "localhost" and not is_loopback_ip(host):
+        raise ValueError(
+            f"refusing MCP URL {url!r}: the bridge only connects to loopback addresses "
+            "(127.0.0.1, ::1, localhost)"
+        )
     return url
 
 

@@ -25,7 +25,6 @@ Nothing here writes to stdout: in stdio mode stdout carries the MCP protocol.
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import logging
 import threading
 import time
@@ -40,6 +39,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import ValidationError
 
 from edu09 import __version__
+from edu09.mcp_server.netaddr import ip_literal, is_loopback_ip, is_unspecified_ip
 
 if TYPE_CHECKING:
     from edu09.device.scope import Scope
@@ -171,22 +171,16 @@ def client_url(host: str, port: int) -> str:
     wildcard bind (``0.0.0.0`` / ``::``) maps to ``127.0.0.1`` / ``[::1]`` (a wildcard is no
     address to connect to, and the bridge only follows loopback URLs). Published in
     ``owner.json``."""
-    try:
-        ip = ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        return mcp_url(host, port)
-    if ip.is_unspecified:
+    ip = ip_literal(host)
+    if ip is not None and is_unspecified_ip(host):
         return mcp_url("127.0.0.1" if ip.version == 4 else "::1", port)
     return mcp_url(host, port)
 
 
 def _is_loopback(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return False
+    """``localhost``, 127.0.0.0/8 or exactly ``::1`` - deterministic on every Python version
+    (IPv4-mapped/compatible and other embedded forms are NOT loopback; see ``netaddr``)."""
+    return host == "localhost" or is_loopback_ip(host)
 
 
 def check_host(host: str, allow_remote: bool) -> None:
@@ -267,11 +261,7 @@ def transport_security(
         own = f"{_bracket(host)}:*"
     else:
         hosts = [f"{h}:{port_s}" for h in _LOOPBACK_HOST_PATTERNS]
-        try:
-            unspecified = ipaddress.ip_address(host.strip("[]")).is_unspecified
-        except ValueError:
-            unspecified = False
-        own = None if unspecified else f"{_bracket(host)}:{port_s}"
+        own = None if is_unspecified_ip(host) else f"{_bracket(host)}:{port_s}"
     if own is not None and own not in hosts:
         hosts.append(own)
     for entry in allowed_hosts:

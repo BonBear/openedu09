@@ -44,6 +44,11 @@ from edu09.transport.sim import SimTransport
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "h1"
 WAIT_S = 10.0
+# Single timeout (simulated seconds) for tests that need a capture to STAY armed. A VirtualClock
+# sim advances ~33 ms per waiting report without sleeping, so a 30 s timeout elapses in ~50 ms of
+# real time and a real-time poll (coarse on Windows, GIL hand-off) can miss the ARMED state
+# entirely (CI: "timed out waiting for armed"). 1e6 s keeps it armed for minutes of real time.
+HOLD_ARMED_S = 1e6
 
 
 # --------------------------------------------------------------------------------------------
@@ -401,7 +406,7 @@ def test_run_stop_and_settings_change_mid_run(scope: Scope, sim: SimTransport) -
 def test_stop_cancels_pending_single_quickly(scope: Scope, sim: SimTransport) -> None:
     sim.device.never_trigger = True
     scope.configure(trigger_mode="normal")
-    fut = scope.acquire_async(timeout_s=30)
+    fut = scope.acquire_async(timeout_s=HOLD_ARMED_S)
     wait_until(lambda: scope.status.state == "armed", what="armed")
     t0 = time.monotonic()
     scope.stop()
@@ -414,7 +419,7 @@ def test_stop_cancels_pending_single_quickly(scope: Scope, sim: SimTransport) ->
 def test_future_cancel_aborts_armed_single(scope: Scope, sim: SimTransport) -> None:
     sim.device.never_trigger = True
     scope.configure(trigger_mode="normal")
-    fut = scope.acquire_async(timeout_s=30)
+    fut = scope.acquire_async(timeout_s=HOLD_ARMED_S)
     wait_until(lambda: scope.status.state == "armed", what="armed")
     assert fut.cancel()
     wait_until(lambda: scope.status.state == "idle", what="idle after cancel")
@@ -527,7 +532,7 @@ def test_shutdown_cancels_pending_futures(sim: SimTransport) -> None:
     sim.device.never_trigger = True
     scope = open_scope(sim)
     scope.configure(trigger_mode="normal")
-    futs = [scope.acquire_async(timeout_s=60) for _ in range(4)]
+    futs = [scope.acquire_async(timeout_s=HOLD_ARMED_S) for _ in range(4)]
     wait_until(lambda: scope.status.state == "armed", what="armed")
     t0 = time.monotonic()
     scope.close()
