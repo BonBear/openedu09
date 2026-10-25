@@ -34,4 +34,5 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ### Known limitations
 - Windows verified with hardware (Python 3.12/3.13 only); macOS untested.
-- Vertical gain is calibrated per unit by the wizard; 5 V/div positive gain/nonlinearity needs >15 V.
+- Vertical gain is calibrated per unit by the wizard; full 5 V/div calibration needs `--max-volts 25`
+  (negative nonlinearity beyond 5 div at 5 V/div would need -30 V, the input limit).
