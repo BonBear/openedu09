@@ -29,11 +29,13 @@ import math
 import os
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal
 
 import numpy as np
+import numpy.typing as npt
 from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError, ToolError
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
@@ -100,6 +102,7 @@ TOOL_NAMES: Final = (
     "acquire",
     "get_waveform",
     "measure",
+    "spectrum",
     "export_csv",
     "set_running",
     "list_waveforms",
@@ -107,6 +110,12 @@ TOOL_NAMES: Final = (
     "calibrate",
 )
 CLIPPED_WARNING: Final = "clipped: increase volts_per_div"
+SPECTRUM_MAX_POINTS: Final = SAMPLES_PER_FRAME + 1
+SPECTRUM_MAX_PEAKS: Final = 32
+SPECTRUM_DB_FLOOR_RANGE: Final = (-200.0, 0.0)
+DESPIKE_IGNORED_WARNING: Final = (
+    "despike ignored: only for ETS timebases (50/20/10 us/div); it corrupts realtime frames"
+)
 AUTOSET_MODULE: Final = "edu09.device.autoset"
 
 # --------------------------------------------------------------------------------------------
@@ -363,6 +372,49 @@ def _default_export_name(wf: Waveform) -> str:
 
 
 # --------------------------------------------------------------------------------------------
+# spectrum helpers
+# --------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _SpectrumInput:
+    """Waveform view with replaced samples (despiked) for :func:`analysis.spectrum_waveform`."""
+
+    volts: npt.NDArray[np.float64]
+    dt: float
+    clipped: bool
+    settings: Settings
+
+
+def _peak_payload(p: analysis.SpectrumPeak) -> dict[str, Any]:
+    return {"freq_hz": p.freq_hz, "vrms": p.vrms, "dbv": p.dbv}
+
+
+def _spectrum_points(spec: analysis.Spectrum, max_points: int, db_floor: float) -> dict[str, Any]:
+    """dBV per bin, floored at ``db_floor``; max-decimated (peaks survive) to ``max_points``.
+
+    Bin ``k`` is at ``f0_hz + k * df_hz``. When there are more bins than ``max_points`` the bins
+    are split into ``max_points`` contiguous near-equal buckets and each bucket's strongest bin
+    is returned; ``i`` then holds the bin index of each point.
+    """
+    db = np.maximum(spec.dbv, db_floor)
+    m = int(db.size)
+    out: dict[str, Any] = {"f0_hz": 0.0, "df_hz": spec.resolution_hz, "n": m}
+    if m <= max_points:
+        out["decimation"] = "none"
+        out["dbv"] = _round_list(db)
+        return out
+    # max_points near-equal contiguous buckets (sizes differ by at most one bin)
+    starts = np.linspace(0, m, max_points + 1).astype(np.intp)[:-1]
+    bucket = np.cumsum(np.isin(np.arange(m), starts)) - 1
+    order = np.lexsort((-db, bucket))  # by bucket, strongest first (ties: lowest bin)
+    idx = order[np.searchsorted(bucket[order], np.arange(max_points))]
+    out.update({"n": max_points, "decimation": "max", "i": [int(i) for i in idx.tolist()]})
+    out["dbv"] = _round_list(db[idx])
+    return out
+
+
+# --------------------------------------------------------------------------------------------
 # registration
 # --------------------------------------------------------------------------------------------
 
@@ -398,6 +450,7 @@ def _capabilities() -> dict[str, Any]:
         "signal; trigger_mode 'none' is not allowed there",
         "measurements": list(analysis.MEASUREMENTS),
         "decimation_methods": ["minmax", "stride"],
+        "spectrum_windows": list(analysis.WINDOWS),
         "limits": dict(LIMITS),
     }
 
@@ -578,6 +631,67 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
                     "results": results,
                     "despiked": despike,
                     "warnings": _waveform_warnings(wf),
+                }
+            )
+
+    @mcp.tool(
+        description="FFT amplitude spectrum of the full stored frame (1024 samples -> 513 bins, "
+        "0..fs/2, resolution fs/1024). window: "
+        + ", ".join(analysis.WINDOWS)
+        + " (flattop for accurate amplitudes, hann/blackman to separate close tones). Returns "
+        "dc_v, fundamental {freq_hz, vrms, dbv}, thd_pct (harmonics 2..10 below fs/2), the "
+        "strongest peaks and points: dBV per bin floored at db_floor, bin k at f0_hz + k*df_hz "
+        "(when max-decimated 'i' gives each point's bin). No anti-alias filter: on realtime "
+        "timebases components above fs/2 fold back (see warnings). ETS frames (50/20/10 us) are "
+        "valid only for repetitive signals; despike=true (ETS only) removes isolated outliers."
+    )
+    def spectrum(
+        waveform_id: str = "latest",
+        window: Annotated[str, Field(description="hann, hamming, blackman, flattop, rect")] = (
+            "hann"
+        ),
+        max_points: Annotated[int, Field(description="16..1025 spectrum points")] = 512,
+        peaks: Annotated[int, Field(description="0..32 strongest peaks")] = 8,
+        db_floor: Annotated[float, Field(description="dBV floor for points (-200..0)")] = -80.0,
+        despike: Annotated[bool, Field(description="despike first (ETS frames only)")] = False,
+    ) -> CallToolResult:
+        with _tool_errors():
+            if not isinstance(window, str) or window.strip().lower() not in analysis.WINDOWS:
+                raise ValueError(
+                    f"window must be one of {', '.join(analysis.WINDOWS)}, got {window!r}"
+                )
+            mp = _check_int("max_points", max_points, MIN_POINTS, SPECTRUM_MAX_POINTS)
+            npk = _check_int("peaks", peaks, 0, SPECTRUM_MAX_PEAKS)
+            floor = _check_range("db_floor", db_floor, *SPECTRUM_DB_FLOOR_RANGE)
+            if not isinstance(despike, bool):
+                raise ValueError("despike must be true or false")
+            wf = get_wf(waveform_id)
+            extra: list[str] = []
+            src: analysis.SampledSignal = wf
+            despiked = False
+            if despike and wf.settings.timebase.is_ets:
+                src = _SpectrumInput(analysis.despike(wf.volts), wf.dt, wf.clipped, wf.settings)
+                despiked = True
+            elif despike:
+                extra.append(DESPIKE_IGNORED_WARNING)
+            spec = analysis.spectrum_waveform(src, window=window, max_peaks=npk)
+            warnings = list(spec.warnings) + extra
+            warnings += [w for w in _waveform_warnings(wf) if w != CLIPPED_WARNING]
+            fund = spec.fundamental
+            return _ok(
+                {
+                    "waveform_id": wf.waveform_id,
+                    "window": spec.window,
+                    "fs_hz": spec.fs_hz,
+                    "resolution_hz": spec.resolution_hz,
+                    "n": spec.n,
+                    "dc_v": spec.dc_v,
+                    "fundamental": _peak_payload(fund) if fund is not None else None,
+                    "thd_pct": spec.thd_pct,
+                    "peaks": [_peak_payload(p) for p in spec.peaks],
+                    "points": _spectrum_points(spec, mp, floor),
+                    "despiked": despiked,
+                    "warnings": warnings,
                 }
             )
 

@@ -86,6 +86,7 @@ Tools:
 | `acquire` | single shot; returns a waveform id, stats (min, max, mean, Vpp, Vrms, frequency) and decimated points |
 | `get_waveform` | a stored waveform (`latest` or an id such as `w12`), optionally windowed/decimated |
 | `measure` | named measurements on a stored waveform |
+| `spectrum` | FFT amplitude spectrum of a stored waveform: fundamental, THD, peaks, dBV points (see [Spectrum analyzer](#spectrum-analyzer)) |
 | `export_csv` | write a stored waveform to a plain `*.csv` file in the export directory |
 | `set_running` | start or stop continuous acquisition |
 | `list_waveforms` | the last 32 stored waveforms |
@@ -105,6 +106,47 @@ when the server stops. Responses are small (no raw samples, at most 8 KB).
 
 Resources: `edu09://status`, `edu09://capabilities`, and per-waveform JSON/CSV
 (`edu09://waveform/{id}` and its CSV variant).
+
+## Spectrum analyzer
+
+FFT of the acquired 1024-sample frame: 513 bins from 0 to fs/2, spaced fs/1024 (152.6 Hz at
+200 us/div, 0 to 78 kHz). GUI: View > Spectrum (Ctrl+F). MCP: the `spectrum` tool. Library:
+`edu09.analysis.spectrum(samples, dt)`, `spectrum_average(frames, dt, mode="power"|"peak_hold")`
+and `spectrum_waveform(wf)`.
+
+- **Units.** Single-sided RMS amplitude per bin in Vrms and dBV (0 dBV = 1 Vrms), corrected for
+  the window's coherent gain: a sine of amplitude A reads A/sqrt(2) Vrms. The mean (DC) is
+  removed first and reported separately as `dc_v`.
+- **Windows.** `hann` (default), `hamming`, `blackman`, `flattop`, `rect`. Peak amplitudes are
+  corrected for scalloping (within 0.1 % with `flattop`, 0.2 % `blackman`, 0.7 % `hann`, 0.9 %
+  `hamming`, up to 16 % `rect`); raw bin values can be up to 15 % low with `hann` when a tone falls
+  between two bins. Use `flattop` for amplitudes, `hann`/`blackman` to separate close tones.
+- **Peaks and THD.** Peaks are local maxima within 60 dB of the strongest bin, with frequency
+  interpolated between bins. The fundamental is the strongest peak; THD uses harmonics 2..10 below
+  fs/2 (none below fs/2: no THD).
+- **Aliasing.** The EDU09 has no anti-alias filter and about 200 kHz input bandwidth, so on every
+  realtime timebase (fs/2 at most 78 kHz) components above fs/2 fold back into the spectrum: a
+  30 kHz square at 200 us/div shows its 3rd harmonic at 156.25 - 90 = 66 kHz, the 4th at 36 kHz,
+  the 5th at 6 kHz. The tool warns about this. Choose a timebase whose fs/2 is well above the
+  frequencies of interest, or treat peaks near the harmonics' alias positions with care.
+- **ETS (50/20/10 us/div).** Equivalent-time frames (fs = 625 kHz / 1.5625 MHz) are only valid
+  for a stable repetitive signal; the spectrum is labelled accordingly. `despike` (ETS only)
+  removes isolated outlier samples first.
+- **Other limits.** 8-bit ADC: the noise floor is about 50 dB below full scale. A clipped frame
+  adds false harmonics (warning). "too few periods" warns when the fundamental is below 3 bins;
+  use a slower timebase. 0.1 ms and 10 us/div are display zooms of 0.2 ms and 20 us/div: the
+  spectrum uses the real sample interval.
+
+MCP `spectrum(waveform_id="latest", window="hann", max_points=512, peaks=8, db_floor=-80,
+despike=false)` returns `fs_hz`, `resolution_hz`, `n`, `dc_v`, `fundamental` `{freq_hz, vrms,
+dbv}` (or null), `thd_pct`, `peaks`, `points` and `warnings`. `points.dbv` holds the dBV of each
+bin, floored at `db_floor`; bin `k` is at `f0_hz + k * df_hz`. When there are more bins than
+`max_points` (16..1025) the bins are split into `max_points` near-equal buckets and the strongest
+bin of each is kept (so peaks survive), and `points.i` gives each point's bin index.
+
+Example (H1 hardware frame, 555 square ~0..4.3 V, ~58 % duty, 200 us/div, `flattop`):
+fundamental 29.99 kHz, 1.65 Vrms (4.4 dBV), 2nd harmonic 60.0 kHz at -3.7 dBV, aliased
+harmonics at 36.2, 66.2, 23.9 and 6.2 kHz, THD 40 % (only the 2nd harmonic is below fs/2).
 
 ## The probe tool (`edu09-probe`)
 

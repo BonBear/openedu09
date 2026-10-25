@@ -1,4 +1,4 @@
-"""Waveform measurements and decimation (pure numpy, no I/O, no threads).
+"""Waveform measurements, decimation and FFT spectrum (pure numpy, no I/O, no threads).
 
 All functions work on a 1-D sample array (volts) plus the sample interval ``dt`` in seconds, so
 they depend on nothing but numpy. :func:`measure_waveform` / :func:`stats_waveform` accept any
@@ -18,10 +18,11 @@ Conventions (spec sec. 6):
 
 from __future__ import annotations
 
+import functools
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -43,6 +44,15 @@ __all__ = [
     "stats_waveform",
     "decimate",
     "despike",
+    "WINDOWS",
+    "SpectrumPeak",
+    "Spectrum",
+    "spectrum",
+    "spectrum_average",
+    "spectrum_waveform",
+    "INPUT_BANDWIDTH_HZ",
+    "CLIPPED_WARNING",
+    "ETS_WARNING",
 ]
 
 FloatArray = npt.NDArray[np.float64]
@@ -527,3 +537,461 @@ def despike(samples: npt.ArrayLike, threshold: float = 0.0) -> FloatArray:
         low = (lo_n - b) > threshold
     y[1:-1] = np.where(high, hi_n, np.where(low, lo_n, b))
     return y
+
+
+# --------------------------------------------------------------------------- spectrum (FFT)
+
+#: Window names accepted by :func:`spectrum` (first = default).
+WINDOWS: Final[tuple[str, ...]] = ("hann", "hamming", "blackman", "flattop", "rect")
+
+#: Analog input bandwidth of the EDU09 front end (manual); there is no anti-alias filter.
+INPUT_BANDWIDTH_HZ: Final[float] = 200e3
+#: A fundamental needs this many dB above the median bin (noise floor estimate).
+_FUNDAMENTAL_SNR_DB: Final[float] = 20.0
+#: THD uses harmonics 2.._THD_MAX_HARMONIC.
+_THD_MAX_HARMONIC: Final[int] = 10
+#: THD needs the fundamental at or above this bin.
+_THD_MIN_BIN: Final[int] = 6
+#: Harmonic search half-width in bins (THD).
+_THD_SEARCH_BINS: Final[int] = 2
+#: "too few periods" when f1 < this many resolution bins.
+_MIN_PERIODS_BINS: Final[float] = 3.0
+_DB_FLOOR_VRMS: Final[float] = 1e-12
+
+# Periodic (DFT-even) cosine-sum windows: w[k] = sum_j (-1)^j a_j cos(2 pi j k / n).
+_COSINE_COEFFS: Final[dict[str, tuple[float, ...]]] = {
+    "hann": (0.5, 0.5),
+    "hamming": (0.54, 0.46),
+    "blackman": (0.42, 0.5, 0.08),
+    # SciPy / Matlab "flattop" (5-term, about 0.02 dB scalloping)
+    "flattop": (0.21557895, 0.41663158, 0.277263158, 0.083578947, 0.006947368),
+    "rect": (1.0,),
+}
+
+
+@dataclass(frozen=True)
+class SpectrumPeak:
+    """One spectral peak.
+
+    ``freq_hz`` comes from parabolic interpolation of the dB spectrum over the three bins around
+    the local maximum; ``vrms`` is the interpolated (vertex) amplitude, i.e. the scalloping loss
+    of the window is largely removed. ``bin`` is the index of the local-maximum bin.
+    """
+
+    freq_hz: float
+    vrms: float
+    dbv: float
+    bin: int
+
+
+@dataclass(frozen=True)
+class Spectrum:
+    """Single-sided amplitude spectrum of one frame (or an average of frames).
+
+    ``vrms[k]`` is the window-corrected (coherent gain) RMS amplitude of a sine centred on bin
+    ``k``; ``dbv = 20*log10(max(vrms, 1e-12))``. ``freqs_hz[k] = k * resolution_hz`` for
+    ``k = 0 .. n//2``.
+    """
+
+    freqs_hz: FloatArray
+    vrms: FloatArray
+    dbv: FloatArray
+    window: str
+    fs_hz: float
+    resolution_hz: float
+    enbw_bins: float
+    n: int
+    averages: int
+    dc_v: float
+    peaks: tuple[SpectrumPeak, ...]
+    fundamental: SpectrumPeak | None
+    thd_pct: float | None
+    warnings: tuple[str, ...]
+
+
+@functools.lru_cache(maxsize=32)
+def _window_cached(key: str, n: int) -> FloatArray:
+    k = np.arange(n, dtype=np.float64)
+    w = np.zeros(n, dtype=np.float64)
+    for j, a in enumerate(_COSINE_COEFFS[key]):
+        w += (-1.0) ** j * a * np.cos(2.0 * math.pi * j * k / n)
+    w.setflags(write=False)
+    return w
+
+
+def _window(key: str, n: int) -> FloatArray:
+    """Periodic window ``key`` (already validated by :func:`_window_key`) of length ``n``."""
+    return _window_cached(key, n)
+
+
+#: Sub-bin offsets (0 .. 0.5 bin) of the tabulated window responses.
+_RESP_GRID: Final[FloatArray] = np.linspace(0.0, 0.5, 257)
+
+
+@functools.lru_cache(maxsize=32)
+def _response_table(key: str, n: int) -> FloatArray:
+    """``|W(d)| / W(0)`` of window ``key`` on :data:`_RESP_GRID` (symmetric in ``d``)."""
+    w = _window_cached(key, n)
+    k = np.arange(n, dtype=np.float64)
+    phase = np.exp(-2j * math.pi * np.outer(_RESP_GRID, k) / n)
+    table = np.abs(phase @ w) / float(w.sum())
+    table.setflags(write=False)
+    return np.asarray(table, dtype=np.float64)
+
+
+def _window_key(name: str) -> str:
+    key = name.strip().lower() if isinstance(name, str) else ""
+    if key not in _COSINE_COEFFS:
+        raise ValueError(f"unknown window {name!r}; expected one of {', '.join(WINDOWS)}")
+    return key
+
+
+def _fmt_hz(f: float) -> str:
+    if f >= 1e6:
+        return f"{f / 1e6:.4g} MHz"
+    if f >= 1e3:
+        return f"{f / 1e3:.4g} kHz"
+    return f"{f:.4g} Hz"
+
+
+def _amplitude_bins(x: FloatArray, w: FloatArray) -> FloatArray:
+    """Single-sided, coherent-gain corrected RMS amplitude per bin (length n//2 + 1)."""
+    n = x.size
+    mag = np.abs(np.fft.rfft(x * w))
+    scale = float(w.sum())  # n * coherent gain
+    amp = mag / scale
+    amp[1:] *= math.sqrt(2.0)
+    if n % 2 == 0:
+        amp[-1] /= math.sqrt(2.0)  # Nyquist bin is single (like DC)
+    return np.asarray(amp, dtype=np.float64)
+
+
+def _to_db(vrms: FloatArray) -> FloatArray:
+    return np.asarray(20.0 * np.log10(np.maximum(vrms, _DB_FLOOR_VRMS)), dtype=np.float64)
+
+
+def _interp_peak(
+    dbv: FloatArray, vrms: FloatArray, resp: FloatArray, k: int, df: float
+) -> SpectrumPeak:
+    """Peak at local-maximum bin ``k``.
+
+    Frequency: vertex of the parabola through the dB values of bins ``k-1, k, k+1`` (offset
+    clamped to +-0.5 bin; the bin itself at the spectrum edges). Amplitude: the bin value divided
+    by the window's response at that offset, which removes the scalloping loss.
+    """
+    last = dbv.size - 1
+    p = 0.0
+    if 0 < k < last:
+        a, b, c = float(dbv[k - 1]), float(dbv[k]), float(dbv[k + 1])
+        denom = a - 2.0 * b + c
+        if denom < 0.0:
+            p = max(-0.5, min(0.5, 0.5 * (a - c) / denom))
+    r = float(np.interp(abs(p), _RESP_GRID, resp))
+    amp = float(vrms[k]) / r if r > 0.0 else float(vrms[k])
+    amp = max(amp, float(vrms[k]))
+    return SpectrumPeak(
+        freq_hz=(k + p) * df, vrms=amp, dbv=20.0 * math.log10(max(amp, _DB_FLOOR_VRMS)), bin=int(k)
+    )
+
+
+def _find_peaks(
+    dbv: FloatArray,
+    vrms: FloatArray,
+    resp: FloatArray,
+    df: float,
+    enbw_bins: float,
+    min_peak_db: float,
+    first_bin: int = 1,
+    limit: int = 1,
+) -> list[SpectrumPeak]:
+    """Up to ``limit`` merged local maxima at bins >= ``first_bin`` (DC excluded), strongest first.
+
+    A local maximum is ``>=`` its left and ``>`` its right neighbour (``>`` the left one at the
+    Nyquist bin), so flat runs such as an all-zero spectrum yield no peak. A weaker maximum closer
+    than ``enbw_bins + 2`` bins to a stronger accepted one is dropped.
+    """
+    m = dbv.size
+    first_bin = max(1, first_bin)
+    if m <= first_bin or limit <= 0:
+        return []
+    thresh = float(dbv[first_bin:].max()) + float(min_peak_db)
+    v = dbv[first_bin:]
+    left = dbv[first_bin - 1 : m - 1]
+    right = np.append(dbv[first_bin + 1 :], -np.inf)
+    is_max = (v >= left) & (v > right)
+    is_max[-1] = v[-1] > left[-1]  # Nyquist bin: strict on the only neighbour
+    ok = is_max & (v >= thresh) & (vrms[first_bin:] > _DB_FLOOR_VRMS)
+    cand = np.flatnonzero(ok) + first_bin
+    cand = cand[np.lexsort((cand, -dbv[cand]))]  # strongest first, then lowest bin
+    reach = math.ceil(enbw_bins + 2.0) - 1  # |k - j| < enbw + 2  <=>  |k - j| <= reach
+    blocked = np.zeros(m, dtype=bool)
+    kept: list[int] = []
+    for k in cand.tolist():
+        if blocked[k]:
+            continue
+        kept.append(k)
+        if len(kept) >= limit:
+            break
+        blocked[max(0, k - reach) : k + reach + 1] = True
+    return [_interp_peak(dbv, vrms, resp, k, df) for k in kept]
+
+
+def _thd(
+    dbv: FloatArray, vrms: FloatArray, resp: FloatArray, fund: SpectrumPeak, df: float
+) -> float | None:
+    m = dbv.size
+    nyq_bin = m - 1
+    if fund.bin < _THD_MIN_BIN:
+        return None
+    f1_bins = fund.freq_hz / df
+    total = 0.0
+    found = 0
+    for h in range(2, _THD_MAX_HARMONIC + 1):
+        centre = h * f1_bins
+        if centre >= nyq_bin:
+            break
+        lo = max(1, int(math.floor(centre - _THD_SEARCH_BINS)))
+        hi = min(nyq_bin, int(math.ceil(centre + _THD_SEARCH_BINS)))
+        k = lo + int(np.argmax(dbv[lo : hi + 1]))
+        pk = _interp_peak(dbv, vrms, resp, k, df)
+        total += pk.vrms * pk.vrms
+        found += 1
+    if found < 1 or fund.vrms <= 0.0:
+        return None
+    return 100.0 * math.sqrt(total) / fund.vrms
+
+
+def _finish(
+    vrms: FloatArray,
+    resp: FloatArray,
+    *,
+    window: str,
+    fs: float,
+    n: int,
+    enbw_bins: float,
+    averages: int,
+    dc_v: float,
+    max_peaks: int,
+    min_peak_db: float,
+    first_bin: int = 1,
+    extra_warnings: Sequence[str] = (),
+) -> Spectrum:
+    if max_peaks < 0:
+        raise ValueError(f"max_peaks must be >= 0, got {max_peaks}")
+    if not math.isfinite(min_peak_db):
+        raise ValueError(f"min_peak_db must be finite, got {min_peak_db!r}")
+    df = fs / n
+    dbv = _to_db(vrms)
+    freqs = np.arange(vrms.size, dtype=np.float64) * df
+    all_peaks = _find_peaks(
+        dbv, vrms, resp, df, enbw_bins, min_peak_db, first_bin, max(1, max_peaks)
+    )
+    fundamental: SpectrumPeak | None = None
+    if all_peaks and dbv.size > 1:
+        floor = float(np.median(dbv[max(1, first_bin) :]))
+        if all_peaks[0].dbv >= floor + _FUNDAMENTAL_SNR_DB:
+            fundamental = all_peaks[0]
+    thd = _thd(dbv, vrms, resp, fundamental, df) if fundamental is not None else None
+    warnings: list[str] = []
+    if fs / 2.0 < INPUT_BANDWIDTH_HZ:
+        warnings.append(
+            f"aliasing: components above fs/2 = {_fmt_hz(fs / 2.0)} fold back "
+            "(input bandwidth ~200 kHz)"
+        )
+    warnings.extend(extra_warnings)
+    if fundamental is not None and fundamental.freq_hz < _MIN_PERIODS_BINS * df:
+        warnings.append(
+            f"too few periods: fundamental {_fmt_hz(fundamental.freq_hz)} is below "
+            f"{_MIN_PERIODS_BINS:g} x resolution ({_fmt_hz(df)}); use a slower timebase"
+        )
+    return Spectrum(
+        freqs_hz=freqs,
+        vrms=vrms,
+        dbv=dbv,
+        window=window,
+        fs_hz=fs,
+        resolution_hz=df,
+        enbw_bins=enbw_bins,
+        n=n,
+        averages=averages,
+        dc_v=dc_v,
+        peaks=tuple(all_peaks[:max_peaks]),
+        fundamental=fundamental,
+        thd_pct=thd,
+        warnings=tuple(warnings),
+    )
+
+
+def _first_peak_bin(key: str, remove_dc: bool) -> int:
+    """Lowest bin searched for peaks: without DC removal skip the window's DC main lobe."""
+    return 1 if remove_dc else len(_COSINE_COEFFS[key])
+
+
+def _prepare(samples: npt.ArrayLike, remove_dc: bool) -> tuple[FloatArray, float]:
+    x = _as_1d(samples)
+    if x.size < 8:
+        raise ValueError(f"spectrum needs at least 8 samples, got {x.size}")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("spectrum needs finite samples (NaN/inf found)")
+    dc = float(x.mean())
+    if remove_dc:
+        x = x - dc
+    return x, dc
+
+
+def _spectrum(
+    samples: npt.ArrayLike,
+    dt: float,
+    *,
+    window: str = "hann",
+    remove_dc: bool = True,
+    max_peaks: int = 8,
+    min_peak_db: float = -60.0,
+    extra_warnings: Sequence[str] = (),
+) -> Spectrum:
+    dt = _check_dt(dt)
+    key = _window_key(window)
+    x, dc = _prepare(samples, remove_dc)
+    n = x.size
+    w = _window(key, n)
+    enbw = float(n * np.sum(w * w) / float(w.sum()) ** 2)
+    return _finish(
+        _amplitude_bins(x, w),
+        _response_table(key, n),
+        window=key,
+        fs=1.0 / dt,
+        n=n,
+        enbw_bins=enbw,
+        averages=1,
+        dc_v=dc,
+        max_peaks=int(max_peaks),
+        min_peak_db=float(min_peak_db),
+        first_bin=_first_peak_bin(key, remove_dc),
+        extra_warnings=extra_warnings,
+    )
+
+
+def spectrum(
+    samples: npt.ArrayLike,
+    dt: float,
+    *,
+    window: str = "hann",
+    remove_dc: bool = True,
+    max_peaks: int = 8,
+    min_peak_db: float = -60.0,
+) -> Spectrum:
+    """Single-sided FFT amplitude spectrum (Vrms per bin) of one frame sampled every ``dt`` s.
+
+    The mean is removed first (``remove_dc``; reported as ``dc_v`` either way), the frame is
+    multiplied by a periodic ``window`` (:data:`WINDOWS`) and transformed without zero padding,
+    giving ``n//2 + 1`` bins from 0 to ``fs/2`` spaced ``fs/n``. Bin amplitudes are corrected by the
+    window's coherent gain, so a sine of amplitude A centred on a bin reads A/sqrt(2) Vrms there.
+
+    Peaks are local maxima within ``min_peak_db`` (<= 0) of the strongest non-DC bin (with
+    ``remove_dc=False`` the bins of the window's DC main lobe are skipped too), merged when
+    closer than ``enbw_bins + 2`` bins, strongest first, at most ``max_peaks``. A peak's frequency
+    is the vertex of a parabola through the three dB values around the maximum; its amplitude is
+    the bin value divided by the window's response at that offset (scalloping correction).
+    Accuracy for a single noise-free sine anywhere between two bins (measured, n = 1024):
+
+    ========  ===============  ==================  =====================
+    window    bin value        peak ``vrms``       peak ``freq_hz``
+    ========  ===============  ==================  =====================
+    flattop   -0.11 %..+0.03 %  0..+0.07 %          within 0.15 bin
+    blackman  up to 12 % low   0..+0.2 %           within 0.01 bin
+    hann      up to 15 % low   0..+0.7 %           within 0.02 bin
+    hamming   up to 18 % low   0..+0.9 %           within 0.02 bin
+    rect      up to 37 % low   up to 16 % low      within 0.2 bin
+    ========  ===============  ==================  =====================
+
+    ``rect`` leaks strongly; use it only with a whole number of periods in the frame. Use
+    ``flattop`` for amplitudes, ``hann``/``blackman`` to separate close components.
+
+    The fundamental is the strongest peak if it is at least 20 dB above the median bin (the
+    strongest bin of pure noise reaches about 14 dB). THD is ``sqrt(sum h_k^2) / h_1`` (in %) over
+    harmonics 2..10 below fs/2, each the largest bin within +-2 bins of ``k * f1``; None if no
+    harmonic is below fs/2 or ``f1`` is below bin 6.
+    """
+    return _spectrum(
+        samples,
+        dt,
+        window=window,
+        remove_dc=remove_dc,
+        max_peaks=max_peaks,
+        min_peak_db=min_peak_db,
+    )
+
+
+def spectrum_average(
+    frames: Sequence[npt.ArrayLike],
+    dt: float,
+    *,
+    window: str = "hann",
+    mode: Literal["power", "peak_hold"] = "power",
+    **kw: Any,
+) -> Spectrum:
+    """Spectrum of several frames of equal length and ``dt``.
+
+    ``power``: RMS average of the bin amplitudes (mean of ``|X|^2``), which lowers the noise
+    variance but not the noise floor's mean; ``peak_hold``: per-bin maximum. ``dc_v`` is the
+    mean over all frames. ``kw`` takes ``remove_dc``, ``max_peaks`` and ``min_peak_db``.
+    """
+    if mode not in ("power", "peak_hold"):
+        raise ValueError(f"unknown averaging mode {mode!r}; expected 'power' or 'peak_hold'")
+    unknown = set(kw) - {"remove_dc", "max_peaks", "min_peak_db"}
+    if unknown:
+        raise TypeError(f"unexpected keyword argument(s): {', '.join(sorted(unknown))}")
+    remove_dc = bool(kw.get("remove_dc", True))
+    if len(frames) == 0:
+        raise ValueError("spectrum_average needs at least one frame")
+    dt = _check_dt(dt)
+    key = _window_key(window)
+    prepared = [_prepare(f, remove_dc) for f in frames]
+    n = prepared[0][0].size
+    if any(x.size != n for x, _ in prepared):
+        raise ValueError("spectrum_average needs frames of equal length")
+    w = _window(key, n)
+    enbw = float(n * np.sum(w * w) / float(w.sum()) ** 2)
+    amps = np.stack([_amplitude_bins(x, w) for x, _ in prepared])
+    vrms = np.sqrt(np.mean(amps * amps, axis=0)) if mode == "power" else amps.max(axis=0)
+    return _finish(
+        np.asarray(vrms, dtype=np.float64),
+        _response_table(key, n),
+        window=key,
+        fs=1.0 / dt,
+        n=n,
+        enbw_bins=enbw,
+        averages=len(prepared),
+        dc_v=float(np.mean([d for _, d in prepared])),
+        max_peaks=int(kw.get("max_peaks", 8)),
+        min_peak_db=float(kw.get("min_peak_db", -60.0)),
+        first_bin=_first_peak_bin(key, remove_dc),
+    )
+
+
+#: Warning added by :func:`spectrum_waveform` for a clipped frame.
+CLIPPED_WARNING: Final[str] = "clipped: the frame hits the ADC limits, harmonics are not real"
+#: Warning added by :func:`spectrum_waveform` for an ETS frame.
+ETS_WARNING: Final[str] = (
+    "repetitive signals only: equivalent-time (ETS) frame, the spectrum is valid only for a "
+    "stable repetitive signal"
+)
+
+
+def spectrum_waveform(wf: SampledSignal, **kw: Any) -> Spectrum:
+    """:func:`spectrum` on a Waveform-like object, adding the ``clipped`` / ETS warnings.
+
+    Uses ``wf.volts`` and ``wf.dt``; ``wf.clipped`` (if present and true) adds
+    :data:`CLIPPED_WARNING`, an ETS timebase (``wf.settings.timebase.is_ets``) adds
+    :data:`ETS_WARNING`. ``kw`` is passed to :func:`spectrum`.
+    """
+    unknown = set(kw) - {"window", "remove_dc", "max_peaks", "min_peak_db"}
+    if unknown:
+        raise TypeError(f"unexpected keyword argument(s): {', '.join(sorted(unknown))}")
+    extra: list[str] = []
+    if bool(getattr(wf, "clipped", False)):
+        extra.append(CLIPPED_WARNING)
+    tb = getattr(getattr(wf, "settings", None), "timebase", None)
+    if bool(getattr(tb, "is_ets", False)):
+        extra.append(ETS_WARNING)
+    return _spectrum(wf.volts, wf.dt, extra_warnings=extra, **kw)

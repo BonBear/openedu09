@@ -49,6 +49,7 @@ from edu09.gui.controls import ControlPanel
 from edu09.gui.fmt import timebase_text, vdiv_text
 from edu09.gui.plot import MeasurementPanel, ScopePlot
 from edu09.gui.qt_bridge import GUI_SOURCE, ScopeQtAdapter
+from edu09.gui.spectrum import SpectrumPanel
 from edu09.model import Settings, TriggerMode, Waveform
 
 __all__ = ["CloseChoice", "JobAborted", "MainWindow", "module_available"]
@@ -188,6 +189,16 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_view.setMaximumHeight(72)
 
+        # spectrum (hidden until View > Spectrum); above the messages, below the time plot
+        self.spectrum = SpectrumPanel()
+        self.spectrum_dock = QDockWidget("Spectrum", self)
+        self.spectrum_dock.setObjectName("spectrum")
+        self.spectrum_dock.setWidget(self.spectrum)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.spectrum_dock)
+        self.splitDockWidget(self.spectrum_dock, self.log_dock, Qt.Orientation.Vertical)
+        self.spectrum_dock.hide()
+        self.spectrum_dock.visibilityChanged.connect(self._on_spectrum_visibility)
+
         # status bar
         sb = self.statusBar()
         self.conn_label = QLabel()
@@ -289,12 +300,18 @@ class MainWindow(QMainWindow):
         self.despike_action.setToolTip(
             "Remove isolated outlier samples of equivalent-time frames (display + measurements)"
         )
-        self.despike_action.toggled.connect(lambda _on: self._rerender())
+        self.despike_action.toggled.connect(self._on_despike_toggled)
+        self.spectrum.despike_check.toggled.connect(self.despike_action.setChecked)
+        self.spectrum_action = self.spectrum_dock.toggleViewAction()
+        self.spectrum_action.setText("&Spectrum")
+        self.spectrum_action.setShortcut(QKeySequence("Ctrl+F"))
+        self.spectrum_action.setToolTip("FFT spectrum of the displayed frame (below the plot)")
         reset_action = QAction("&Reset zoom", self)
         reset_action.setShortcut(QKeySequence("Ctrl+0"))
         reset_action.triggered.connect(self.plot.reset_view)
         view.addAction(self.cursors_action)
         view.addAction(self.despike_action)
+        view.addAction(self.spectrum_action)
         view.addAction(reset_action)
         view.addAction(self.log_dock.toggleViewAction())
 
@@ -355,11 +372,33 @@ class MainWindow(QMainWindow):
         self._shown = wf
         self._shown_volts = volts
         self.plot.show_waveform(wf, volts)
+        if self.spectrum_visible():
+            self.spectrum.update_waveform(wf, volts)
         self._measure_dirty = True
         if not self._measure_timer.isActive():
             wait = self._measure_interval_s - (time.monotonic() - self._last_measure)
             self._measure_timer.start(max(0, int(wait * 1000)))
         self.rendered.emit(wf)
+
+    def spectrum_visible(self) -> bool:
+        """The spectrum panel is open (it is only computed then)."""
+        return not self.spectrum_dock.isHidden()
+
+    def set_spectrum_visible(self, visible: bool) -> None:
+        self.spectrum_dock.setVisible(visible)
+        self._on_spectrum_visibility(visible)
+
+    def _on_spectrum_visibility(self, _visible: bool) -> None:
+        if self.spectrum_visible() and self._shown is not None:
+            self.spectrum.update_waveform(self._shown, self._shown_volts)
+
+    def _on_despike_toggled(self, on: bool) -> None:
+        if self.spectrum.despike_check.isChecked() != on:
+            self.spectrum.despike_check.blockSignals(True)
+            self.spectrum.despike_check.setChecked(on)
+            self.spectrum.despike_check.blockSignals(False)
+        self.spectrum.reset()  # despiked and raw frames must not be averaged together
+        self._rerender()
 
     def _measure(self) -> None:
         if not self._measure_dirty or self._shown is None or self._shown_volts is None:

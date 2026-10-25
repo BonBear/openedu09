@@ -12,6 +12,11 @@ USB PC oscilloscope kit.
 
 *The GUI running against the built-in simulator (`--simulate`).*
 
+![openedu09 spectrum analyzer showing a 30 kHz 60 % duty square wave at 20 us/div](docs/images/spectrum.png)
+
+*View > Spectrum (Ctrl+F): flat-top window, 8-frame average, peak labels, THD and the ETS note
+(simulated 30 kHz square wave, 60 % duty, ETS timebase).*
+
 **Naming:** the project and PyPI distribution are called `openedu09`; the Python import package
 is `edu09` and the commands are `edu09-gui`, `edu09-mcp`, `edu09-probe` and `edu09-gain`.
 
@@ -34,8 +39,11 @@ verified on real hardware (see [docs/protocol.md](docs/protocol.md)).
   calibrate your own unit with a multimeter and the DC sources you have (batteries, USB 5 V, a
   bench supply): zero, optional RV1 trimmer adjustment, per-range gain (positive and negative side,
   negative-side nonlinearity), save with backup, verify.
-- **MCP server** (`edu09-mcp`): lets an AI agent configure the scope, acquire, measure and
-  export waveforms, over stdio or streamable HTTP.
+- **Spectrum analyzer** (GUI View > Spectrum, MCP `spectrum`, `edu09.analysis.spectrum`): FFT
+  of the 1024-sample frame (513 bins to fs/2) in Vrms/dBV with five windows, peak list,
+  fundamental, THD, averaging and peak hold, and aliasing/ETS/clipping warnings.
+- **MCP server** (`edu09-mcp`): lets an AI agent configure the scope, acquire, measure, view the
+  spectrum and export waveforms, over stdio or streamable HTTP.
 - **Simulator** (`--simulate`): everything works without hardware.
 - **Safety**: one process owns the device at a time (file lock); calibration is opt-in and needs
   the input disconnected; `edu09-probe` blocks unknown opcodes.

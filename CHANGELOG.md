@@ -25,6 +25,10 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
   install/usage docs.
 - Calibration verified on hardware: base offset `0x86`, 0 V within 0.05 div at all ranges and
   positions; offset DAC settle wait (~20 ms) before arming.
+- Spectrum analyzer: `analysis.spectrum` / `spectrum_average` / `spectrum_waveform` (FFT of the
+  frame, Vrms/dBV with coherent-gain correction, hann/hamming/blackman/flattop/rect windows,
+  scalloping-corrected peaks, fundamental, THD, power averaging and peak hold, warnings for
+  aliasing on realtime timebases, clipped and ETS frames) and the MCP `spectrum` tool.
 
 ### Known limitations
 - Vertical gain not calibrated; Windows untested; startup readout timeouts under investigation.
