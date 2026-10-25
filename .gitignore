@@ -1,0 +1,39 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+.secrets/
+*.pem
+*.key
+
+# Third-party vendor software (Velleman, copyrighted) — keep local only
+EDU09/
+
+# Python / tooling
+captures/
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Claude Code agent worktrees
+.claude/worktrees/
+
+# Personal agent memory (local only; agents create it if missing)
+.agents/memory/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Misc build / editor artefacts
+*.egg
+*.whl
+.eggs/
+.coverage
+htmlcov/
+.idea/
+.vscode/

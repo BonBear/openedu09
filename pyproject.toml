@@ -1,0 +1,103 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openedu09"
+dynamic = ["version"]
+description = "Driver, GUI and MCP server for the Whadda WSEDU09 / Velleman EDU09 USB oscilloscope"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Björn Sjölén" }]
+keywords = ["oscilloscope", "whadda", "wsedu09", "velleman", "edu09", "usb", "hid", "mcp", "model-context-protocol", "pyside6", "instrumentation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Hardware :: Universal Serial Bus (USB)",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "hidapi>=0.14",
+    "numpy>=1.26",
+    "mcp>=2.3,<3",
+    "platformdirs>=4",
+    "filelock>=3.12",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
+]
+dev = [
+    "pytest>=8",
+    "pytest-qt>=4.4",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/BonBear/openedu09"
+Issues = "https://github.com/BonBear/openedu09/issues"
+Changelog = "https://github.com/BonBear/openedu09/blob/main/CHANGELOG.md"
+
+[project.scripts]
+edu09-mcp = "edu09.mcp_server.__main__:main"
+edu09-gui = "edu09.gui.app:main"
+edu09-probe = "edu09.probe:main"
+
+[tool.hatch.version]
+path = "src/edu09/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edu09"]
+
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "hardware: needs a real EDU09 attached (run with --hardware or EDU09_HW=1)",
+    "gui: needs PySide6 / Qt (skipped when PySide6 is unavailable)",
+    "slow: slow test",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["mcp"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "edu09.protocol.*",
+    "edu09.units",
+    "edu09.model",
+    "edu09.analysis",
+]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["hid", "hidraw", "pyqtgraph", "pyqtgraph.*"]
+ignore_missing_imports = true

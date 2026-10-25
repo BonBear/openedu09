@@ -1,0 +1,30 @@
+# Changelog
+
+All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/).
+
+## [0.1.0] - unreleased
+
+### Added
+- Protocol documentation from reverse engineering, verified on hardware (firmware 1.01).
+- Driver: HID transport (hidraw on Linux, hidapi), protocol encoding/decoding, `Scope` with
+  acquisition worker, single-process device ownership via a file lock.
+- 14 timebases (500 ms/div to 10 us/div, ETS at 50/20/10 us), AUTO/NORMAL/off trigger, rising/falling edge.
+- Simulator for hardware-free use and tests.
+- `edu09-probe` diagnostic tool with opcode safety gates and JSONL capture.
+- Calibration (offset DAC, ground fit) and autoset.
+- MCP server (`edu09-mcp`): stdio and streamable HTTP (loopback by default).
+- MCP bridge: a stdio `edu09-mcp` forwards to a GUI (or other process) that owns the device and
+  serves MCP; loopback owner URLs only, `--no-bridge` to disable, exit code 2 with a clear message
+  when the owner offers no MCP URL.
+- Remote hardening: non-loopback `--host` requires `--allow-remote`; `--allowed-host NAME[:PORT]`
+  for extra Host headers; DNS-rebinding protection; still no authentication.
+- GUI (`edu09-gui`): live trace, cursors, measurements, CSV export, calibration, built-in MCP server.
+- GUI follow-ups: acquisition-state indicator, confirm dialog when closing during calibration or
+  auto-set, `libxcb-cursor` pre-flight message on Linux (`EDU09_SKIP_QT_CHECK=1` to skip).
+- Hardware test suite (opt-in, `pytest --hardware tests/hw`), udev rule and installer script,
+  install/usage docs.
+- Calibration verified on hardware: base offset `0x86`, 0 V within 0.05 div at all ranges and
+  positions; offset DAC settle wait (~20 ms) before arming.
+
+### Known limitations
+- Vertical gain not calibrated; Windows untested; startup readout timeouts under investigation.
