@@ -27,14 +27,14 @@ Steps (count domains as in ``units``: raw = sample, ad = 255 - raw):
    most :data:`RANGE_CORR_LIMIT` steps (a larger one means a DC voltage on the input).
 
 ``measure_calibration`` returns ``Calibration(source="measured")``; ``Scope.calibrate`` installs
-and saves it. The per-range gains (``Calibration.range_gain``) and the reserved
-``neg_nonlinearity`` data of the current calibration are carried over unchanged: offsets are
-measured with an open input, gains need a reference voltage.
+and saves it. The gain data of the current calibration (``range_gain``, ``range_gain_neg``,
+``neg_nonlinearity``) is carried over unchanged (``dataclasses.replace``; ``meta`` is cleared):
+offsets are measured with an open input, gains need a reference voltage.
 
 **Gain** (separate, needs a DC reference and a multimeter): :func:`gain_from_reference` measures
 the mean voltage of a known positive DC level with trigger off at 5 ms/div against the current
-calibration *without* its gain correction and returns ``g = V_ref / V_read`` for
-``Calibration.range_gain``. CLI: ``edu09-gain`` (:func:`main`).
+calibration *without* its gain correction (``Calibration.without_gain_correction``) and
+returns ``g = V_ref / V_read`` for ``Calibration.range_gain``. CLI: ``edu09-gain`` (:func:`main`).
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ import argparse
 import dataclasses
 import logging
 import sys
+import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -63,7 +64,9 @@ __all__ = [
     "CAL_WINDOW",
     "GAIN_FRAMES",
     "LevelReading",
+    "capture_window",
     "gain_from_reference",
+    "level_settings",
     "main",
     "measure_calibration",
 ]
@@ -101,13 +104,67 @@ MAX_CLIPPED_FRACTION: Final = 0.01
 
 @dataclass(frozen=True)
 class LevelReading:
-    """One averaged level: mean/std of the raw samples, fraction of samples at 0 or 255."""
+    """One averaged level: mean/std of the raw samples, fraction of samples at 0 or 255.
+
+    ``std`` is the per-frame sample std averaged over the frames; ``frame_spread`` the spread
+    (max - min) of the per-frame means (0 for one frame): a drifting source or a settling front
+    end shows up there.
+    """
 
     dac: int
     vdiv: float
     mean: float
     std: float
     clipped: float
+    frame_spread: float = 0.0
+
+    @classmethod
+    def from_samples(cls, x: np.ndarray, dac: int, vdiv: float) -> LevelReading:
+        """Level of a ``(frames, samples)`` raw array (see :func:`capture_window`)."""
+        x = np.asarray(x, dtype=np.float64)
+        if x.ndim == 1:
+            x = x[np.newaxis, :]
+        means = x.mean(axis=1)
+        return cls(
+            dac=int(dac),
+            vdiv=float(vdiv),
+            mean=float(x.mean()),
+            std=float(np.mean(np.std(x, axis=1))),
+            clipped=float(np.mean((x <= tables.ADC_MIN) | (x >= tables.ADC_MAX))),
+            frame_spread=float(means.max() - means.min()),
+        )
+
+
+def level_settings(ch: ChannelSettings) -> Settings:
+    """Capture settings of a level reading: ``ch`` at :data:`CAL_TIMEBASE`, trigger off."""
+    return Settings(ch1=ch, timebase=CAL_TIMEBASE).replace(
+        trigger_mode=TriggerMode.NONE, trigger_level_v=0.0
+    )
+
+
+def capture_window(
+    io: DeviceIO,
+    ch: ChannelSettings,
+    cal: units.Calibration,
+    frames: int,
+    *,
+    settle_s: float | None = None,
+) -> np.ndarray:
+    """``frames`` free-run frames of ``ch`` (offset DAC from ``cal``) at :data:`CAL_TIMEBASE`;
+    returns the raw samples of the first :data:`CAL_WINDOW` samples of each frame as a
+    ``(frames, CAL_WINDOW)`` float64 array (100 ms each: mains hum averages out)."""
+    if frames < 1:
+        raise ValueError("frames must be >= 1")
+    extra: dict[str, float] = {} if settle_s is None else {"settle_s": settle_s}
+    data = io.live_samples(
+        frames * tables.FRAME_SIZE,
+        timebase=CAL_TIMEBASE,
+        settings=level_settings(ch),
+        calibration=cal,
+        **extra,
+    )
+    x = np.frombuffer(data, dtype=np.uint8).reshape(frames, tables.FRAME_SIZE)
+    return x[:, :CAL_WINDOW].astype(np.float64)
 
 
 def _cal_settings(vdiv: VoltsPerDiv) -> Settings:
@@ -133,20 +190,11 @@ def _read_level(
 ) -> LevelReading:
     if not tables.OFFSET_DAC_MIN <= dac <= tables.OFFSET_DAC_MAX:
         raise CalibrationError(f"CALIBRATION FAILED: offset DAC byte {dac} out of 0..255")
-    extra: dict[str, float] = {} if settle_s is None else {"settle_s": settle_s}
-    data = io.live_samples(
-        CAL_FRAMES * tables.FRAME_SIZE,
-        timebase=CAL_TIMEBASE,
-        settings=_cal_settings(vdiv),
-        calibration=_probe_calibration(dac, io.calibration),
-        **extra,
+    ch = _cal_settings(vdiv).ch1
+    x = capture_window(
+        io, ch, _probe_calibration(dac, io.calibration), CAL_FRAMES, settle_s=settle_s
     )
-    frames = np.frombuffer(data, dtype=np.uint8).reshape(CAL_FRAMES, tables.FRAME_SIZE)
-    x = frames[:, :CAL_WINDOW].astype(np.float64)
-    # std per frame (frames are not contiguous in time), averaged
-    std = float(np.mean(np.std(x, axis=1)))
-    clipped = float(np.mean((x <= tables.ADC_MIN) | (x >= tables.ADC_MAX)))
-    r = LevelReading(dac, float(vdiv), float(x.mean()), std, clipped)
+    r = LevelReading.from_samples(x, dac, float(vdiv))
     log.debug(
         "cal level %g V/div dac=0x%02X: mean=%.2f std=%.2f clip=%.3f",
         r.vdiv,
@@ -301,29 +349,30 @@ def _measure(io: DeviceIO) -> units.Calibration:
         dac, _ = _search_dac(read_range, base, gnd_raw, range_allowed, f"{vdiv.label}/div range")
         corr[float(vdiv)] = dac - base
 
-    cal = units.Calibration(
-        base_ofs=base,
-        range_corr=corr,
-        gnd_fit=fit,
-        counts_per_div=cur.counts_per_div,
-        adc_inverted=cur.adc_inverted,
-        source="measured",
-        range_gain=cur.range_gain,
-        neg_nonlinearity=cur.neg_nonlinearity,
+    # gains (range_gain, range_gain_neg, neg_nonlinearity) carried over; provenance cleared
+    cal = dataclasses.replace(
+        cur, base_ofs=base, range_corr=corr, gnd_fit=fit, source="measured", meta=None
     )
     log.info("calibration result: %s", cal.to_dict())
     return cal
 
 
-def measure_calibration(scope: Scope, *, timeout_s: float = 300.0) -> units.Calibration:
+def measure_calibration(
+    scope: Scope,
+    *,
+    timeout_s: float = 300.0,
+    abort_event: threading.Event | None = None,
+) -> units.Calibration:
     """Measure base offset, ground fit and range corrections with the input disconnected.
 
     Runs exclusively on the worker (acquisition paused, then resumed with the user's settings).
     Does not install or save the result: use ``Scope.calibrate`` for that (it requires the
-    confirmation flags). Raises ``CalibrationError`` (message starts with
-    ``"CALIBRATION FAILED"``), ``AcquisitionTimeout``, ``DeviceDisconnected``.
+    confirmation flags). ``abort_event`` (passed to ``Scope.run_exclusive``; default: the
+    calling ``Scope.calibrate``'s own event) ends it with ``JobAborted`` once set.
+    Raises ``CalibrationError`` (message starts with ``"CALIBRATION FAILED"``),
+    ``AcquisitionTimeout``, ``DeviceDisconnected``, ``JobAborted``.
     """
-    return scope.run_exclusive(_measure, timeout_s=timeout_s)
+    return scope.run_exclusive(_measure, timeout_s=timeout_s, abort_event=abort_event)
 
 
 # --------------------------------------------------------------------------------------------
@@ -391,7 +440,7 @@ def gain_from_reference(
     )
 
     def run(io: DeviceIO) -> float:
-        cal = dataclasses.replace(io.calibration, range_gain={})
+        cal = io.calibration.without_gain_correction()
         data = io.live_samples(
             frames * tables.FRAME_SIZE,
             timebase=CAL_TIMEBASE,

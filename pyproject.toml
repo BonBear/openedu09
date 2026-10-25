@@ -53,6 +53,7 @@ edu09-mcp = "edu09.mcp_server.__main__:main"
 edu09-gui = "edu09.gui.app:main"
 edu09-probe = "edu09.probe:main"
 edu09-gain = "edu09.device.calibration:main"
+edu09-calibrate = "edu09.calwizard.cli:main"
 
 [tool.hatch.version]
 path = "src/edu09/__init__.py"

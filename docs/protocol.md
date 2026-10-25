@@ -308,9 +308,19 @@ counts per division = 32
 **Unknown**. The GUI works in an inverted "screen" domain (`255 - raw`), and the exported GND is
 `255 - efb228` (0x5da1e8). Verify on hardware.
 
-Hardware (section 11.3): the real gain is a few per cent higher than 32 counts/div and differs per range;
-the driver corrects it with a per-range factor `g = V_true / V_read` (`Calibration.range_gain`), i.e. an
-effective `32 / g` counts per division.
+Hardware (section 11.3): the real gain is a few per cent higher than 32 counts/div and differs per range
+and per side of ground; the driver corrects it per range (calibration v2, `units.deflection_to_volts`). With
+`dev` = counts relative to ground in the voltage sense (`(raw - gnd) * s`, `s = -1` for an inverted ADC):
+
+```
+dev >= 0:  V = dev * V/div * g+ / 32                       # g+ = range_gain (positive side)
+dev <  0:  r = -dev * g- / 32                              # g- = range_gain_neg (falls back to g+)
+           V = -(r - E(r)) * V/div                         # E: negative nonlinearity knots (11.3)
+```
+
+`E` is piecewise linear through the per-range knots `(r_k, e_k)` (`neg_nonlinearity`), 0 for `r <= r_0` and
+extrapolated with the last slope; the inverse (volts -> counts, trigger byte) is exact. The position ->
+offset DAC mapping keeps the positive effective `32 / g+` counts per division.
 
 ### 5.3 Offset DAC and ground level
 
@@ -638,7 +648,33 @@ averaged; the offset/ground calibration of 11.2 checked accurate within ~1 count
     every counts <-> volts path, the trigger byte and the position -> offset DAC mapping. The table is
     `tables.TYPICAL_RANGE_GAIN`, used by `Calibration.typical()` (measured on one unit only). Measure your
     own with `edu09-gain` / `edu09.device.calibration.gain_from_reference` (docs/usage.md).
-28. **Negative large-deflection nonlinearity (under investigation)**: levels more than ~3-4 div *below* ground
-    read up to **~6 % too large** in magnitude on top of the gain error (front-end nonlinearity). Not
-    corrected yet. The calibration JSON reserves the key `neg_nonlinearity` (opaque object, loaded and saved
-    unchanged, part of `calibration_id`, not applied) for a future optional piecewise correction.
+28. **Negative side** (sweep data: `docs/data/edu09_gain_sweep_unit1.json`): below ground the sensitivity is
+    **0.5-1 % higher** than above ground (unit 1, 0.5 V/div: 33.0 counts/div vs 32.85), independent of the
+    position. At **0.2 and 0.5 V/div** it **expands beyond ~4 div below ground** (0.5 V/div secant 33.0 up to
+    4 div, 33.55 at 5 div, 34.73 at 6 div); at 0.1 and 1 V/div no expansion was seen in the measured span
+    (to 5 resp. 3 div). The effect depends on the *deflection*, not on the ADC code or position.
+    Calibration v2 models this per range:
+
+    | Field (calibration.json) | Meaning |
+    |---|---|
+    | `range_gain` | `g+`, positive side (as before) |
+    | `range_gain_neg` | `g-`, negative-side linear gain; missing = `g+` |
+    | `neg_nonlinearity` | `{"0.5": [[r, e], ...]}`: knots of the excess `E` in the linear-corrected read domain `r = c * g- / 32` (`c` counts below ground); true deflection `d = r - E(r)` |
+    | `meta` | provenance (tool, date, mode, sources); not part of `calibration_id` |
+
+    Knot rules (`tables.NL_*`): 2-8 knots, `e_0 = 0`, `1 <= r_0`, `r` strictly increasing and `<= 10`,
+    `|e| <= 2` div and every slope `de/dr` within +-0.5 (so the mapping is strictly monotonic). Unit 1
+    (`transport.sim.UNIT1`, the simulator's `unit1` front end):
+
+    | V/div | g+ | g- | knots (r, e) |
+    |---|---|---|---|
+    | 0.1 | 0.9870 | 0.9846 | - |
+    | 0.2 | 0.9750 | 0.9668 | (4.0, 0) (5.069, 0.069) (6.26, 0.26)* |
+    | 0.5 | 0.9741 | 0.9697 | (4.0, 0) (5.083, 0.083) (6.315, 0.315) |
+    | 1 | 0.9960 | 0.9892 | - |
+    | 2 | 0.9810 | 0.9786 | - |
+    | 5 | 0.9789 | 0.9726* | - |
+
+    (* extrapolated or assumed.) Files with any of the v2-only keys are written as `"version": 2`; offset-
+    and `range_gain`-only files stay version 1 (readable by older builds). The calibration wizard
+    (`edu09-calibrate`, docs/specs/calibration_wizard.md) measures and fits all of this per unit.

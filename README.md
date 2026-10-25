@@ -29,7 +29,11 @@ verified on real hardware (see [docs/protocol.md](docs/protocol.md)).
   14 timebases from 500 ms/div to 10 us/div (50/20/10 us use equivalent-time sampling), AUTO /
   NORMAL / off trigger with rising or falling edge.
 - **GUI** (`edu09-gui`, PySide6 + pyqtgraph): live trace, cursors, measurements, CSV export,
-  auto-set, calibration, optional built-in MCP server.
+  auto-set, a calibration wizard, optional built-in MCP server.
+- **Calibration wizard** (GUI Tools > Calibrate, `edu09-calibrate`, MCP `calibration_*` tools):
+  calibrate your own unit with a multimeter and the DC sources you have (batteries, USB 5 V, a
+  bench supply): zero, optional RV1 trimmer adjustment, per-range gain (positive and negative side,
+  negative-side nonlinearity), save with backup, verify.
 - **MCP server** (`edu09-mcp`): lets an AI agent configure the scope, acquire, measure and
   export waveforms, over stdio or streamable HTTP.
 - **Simulator** (`--simulate`): everything works without hardware.
@@ -118,25 +122,49 @@ controls the scope, so use it only on a trusted network (see [SECURITY.md](SECUR
 
 More in [docs/usage.md](docs/usage.md) (GUI tour, MCP tools, calibration, hardware tests).
 
+## Calibration
+
+Run the wizard once per unit (GUI Tools > Calibrate, or `edu09-calibrate`; you need a multimeter
+and one or more DC sources). Recommended order:
+
+1. Turn the board trimmer **RV1** (between IC1 CD74HCT4052 and IC2; "fine tuning of the input
+   amplifier circuit" in the WSEDU09 manual) to its **middle** position.
+2. **Zero** with the input disconnected.
+3. Optional **trimmer step**: a 1.5 V battery at 0.5 V/div DC; turn RV1 slowly with a small
+   screwdriver until the live deviation from the multimeter reading is ~0 (RV1 changes the gain
+   of all ranges, so the gain steps follow).
+4. **Per-range gain** steps with the planned voltages, then **save** (backup made) and **verify**.
+
+```bash
+edu09-calibrate --plan-only --fixed 1.5@10%,rev,label=AA --fixed 5,label=USB   # what you can cover
+edu09-calibrate --fixed 1.5@10%,rev,label=AA --fixed 5,label=USB --trimmer
+```
+
+Details in [docs/usage.md](docs/usage.md#calibration).
+
 ## Safety notes
 
 - Stay within the input rating of the EDU09 board (see the vendor manual); the driver cannot
   protect the hardware from over-voltage. Use the x1 probe settings assumed here.
-- Calibration needs the input **disconnected** and rewrites the stored calibration (a backup is
-  made). Do not run it with a signal connected.
+- Max input **30 V** (AC + DC); input impedance 100 kOhm. The calibration wizard asks for at most
+  15 V by default.
+- The calibration's zero step needs the input **disconnected**; saving rewrites the stored
+  calibration (a backup is made). Only swap the leads of **floating** sources (batteries,
+  isolated supplies), never of a source that shares ground with the PC.
 - Only one program can use the scope at a time; the second one gets a clear "device busy"
   message naming the owner.
-- The vertical gain is corrected per range (`range_gain` in `calibration.json`; typical values
-  measured on one unit are the default when no calibration file exists). Measure your own unit
-  against a DC reference with `edu09-gain` (docs/usage.md) for best accuracy.
+- The vertical gain is corrected per range (typical values measured on one unit are the default
+  when no calibration file exists). Calibrate your own unit with the wizard for best accuracy.
 
 ## Project status and limitations
 
 Alpha (0.1.0, unreleased). Known limitations:
 
-- Vertical gain: per-range correction (`range_gain`) is supported; uncorrected units read
-  0.4-2.6 % high. Large **negative** deflections (more than ~3-4 div below ground) still read up
-  to ~6 % too large (front-end nonlinearity, under investigation).
+- Vertical gain: uncorrected units read 0.4-2.6 % high, and large **negative** deflections (more
+  than ~4 div below ground at 0.2/0.5 V/div) up to ~6 % too large; the calibration wizard measures
+  and corrects both per unit (positive/negative gain and a piecewise negative correction). The
+  wizard is new and not yet verified on hardware; the purpose of the board trimmer RV1 comes from
+  the vendor manual.
 - **Windows is untested** (no test machine); CI only runs the simulator-based tests.
 - Intermittent readout timeouts at startup are known and under investigation.
 - Single channel (CH1) only; other firmware versions untested.

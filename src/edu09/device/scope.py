@@ -345,6 +345,12 @@ class Scope:
     def worker(self) -> AcquisitionWorker:
         return self._worker
 
+    @property
+    def transport(self) -> Transport:
+        """The transport this scope talks through (read-only; only the worker may do I/O on
+        it). Lets tools such as ``calwizard.simref.SimReference.for_scope`` find a simulator."""
+        return self._transport
+
     def latest(self) -> Waveform | None:
         return self.store.latest()
 

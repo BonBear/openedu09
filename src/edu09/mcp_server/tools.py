@@ -91,7 +91,8 @@ LIMITS: Final[dict[str, Any]] = {
     "stored_waveforms": storage.DEFAULT_STORE_CAPACITY,
 }
 CSV_COLUMNS: Final = list(storage.CSV_COLUMNS)
-#: Tools in registration order (``calibrate`` only with ``allow_calibration``).
+#: Tools in registration order (``calibrate`` and the ``calibration_*`` wizard tools of
+#: ``cal_tools.CAL_TOOL_NAMES`` only with ``allow_calibration``).
 TOOL_NAMES: Final = (
     "get_status",
     "get_capabilities",
@@ -732,3 +733,7 @@ def register_tools(mcp: "FastMCP", scope: "Scope", opts: "ServerOptions") -> Non
                         "warnings": warnings,
                     }
                 )
+
+        from edu09.mcp_server.cal_tools import register_calibration_tools
+
+        register_calibration_tools(mcp, scope, opts, ok=_ok, tool_errors=_tool_errors)

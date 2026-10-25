@@ -89,11 +89,13 @@ from edu09.transport.base import REPORT_SIZE, TransportInfo
 __all__ = [
     "DEFAULT_SIGNAL",
     "KINDS",
+    "PHYSICAL_UNITS",
     "STATUS_WAITING_FLAG",
     "SignalKind",
     "SignalSpec",
     "SimTransport",
     "SimulatedDevice",
+    "UNIT1",
     "VirtualClock",
 ]
 
@@ -152,6 +154,32 @@ _KEY_ALIASES: Final = {
     "phase": "phase",
     "noise": "noise",
 }
+
+
+# --------------------------------------------------------------------------------------------------
+# Physical front-end models (the device's own calibration: how volts become ADC counts)
+# --------------------------------------------------------------------------------------------------
+UNIT1: Final = units.Calibration(
+    base_ofs=tables.TYPICAL_BASE_OFS,
+    range_corr=dict(tables.TYPICAL_RANGE_CORR),
+    gnd_fit=units.GndFit(tables.TYPICAL_GND_K, tables.TYPICAL_GND_B),
+    source="measured",
+    range_gain={0.1: 0.9870, 0.2: 0.9750, 0.5: 0.9741, 1.0: 0.9960, 2.0: 0.9810, 5.0: 0.9789},
+    range_gain_neg={0.1: 0.9846, 0.2: 0.9668, 0.5: 0.9697, 1.0: 0.9892, 2.0: 0.9786, 5.0: 0.9726},
+    neg_nonlinearity={
+        0.2: ((4.0, 0.0), (5.069, 0.069), (6.26, 0.26)),
+        0.5: ((4.0, 0.0), (5.083, 0.083), (6.315, 0.315)),
+    },
+)
+"""Physical model of the measured unit 1 (docs/data/edu09_gain_sweep_unit1.json, protocol.md
+11.3): typical offsets, positive / negative gains and the negative expansion at 0.2 and 0.5 V/div
+(0.2 V/div beyond 5 div and the 5 V/div negative gain are extrapolated / assumed)."""
+
+PHYSICAL_UNITS: Final[dict[str, units.Calibration]] = {
+    "ideal": units.Calibration(),
+    "unit1": UNIT1,
+}
+"""Named physical front ends for ``SimulatedDevice(calibration=...)`` (``--sim-unit``)."""
 
 
 def _fmt(x: float) -> str:
@@ -411,6 +439,10 @@ class SimulatedDevice:
     slow status), and ``drop_frame_report`` (index 0..15 of a data report dropped from the next
     read-out, one-shot). ``offset_settle_tau_s`` (default 0 = instant) models the offset DAC
     settling exponentially after an offset byte change (HW: ~5 ms time constant).
+    ``trim_gain`` (default 1.0) multiplies the input volts (a stand-in for the board trimmer).
+    ``adc_noise_counts`` (default 0) adds Gaussian noise of that rms (in ADC counts) before
+    quantisation (HW: ~0.7 counts at an open input); it dithers DC levels so averaged means
+    resolve fractions of a count, as on the real device.
     ``signal`` may be replaced at any time (live input change).
     """
 
@@ -433,9 +465,12 @@ class SimulatedDevice:
         max_trigger_search: int = 1 << 16,
         report_interval_s: float = 0.001,
         offset_settle_tau_s: float = 0.0,
+        adc_noise_counts: float = 0.0,
     ) -> None:
         if offset_settle_tau_s < 0 or not math.isfinite(offset_settle_tau_s):
             raise ValueError("offset_settle_tau_s must be finite and >= 0")
+        if not math.isfinite(adc_noise_counts) or adc_noise_counts < 0:
+            raise ValueError("adc_noise_counts must be finite and >= 0")
         if status_poll not in get_args(tables.StatusPollStrategy):
             raise ValueError(f"unknown status_poll strategy {status_poll!r}")
         if status_interval_s <= 0 or status_interval_ets_s <= 0:
@@ -460,6 +495,8 @@ class SimulatedDevice:
         self.offset_settle_tau_s = offset_settle_tau_s
         self.never_trigger = False
         self.drop_frame_report: int | None = None
+        self.trim_gain: float = 1.0
+        self.adc_noise_counts: float = float(adc_noise_counts)
         self._seed = seed
         self._rng = np.random.default_rng(seed)
         self._epoch = clock()
@@ -690,8 +727,10 @@ class SimulatedDevice:
     def _adc_counts(self, v: FloatArray, t: FloatArray) -> FloatArray:
         """Quantized ADC counts (rounded, saturating, float64) of volts ``v`` at times ``t``."""
         ch, cal = self._channel()
-        c = np.rint(units.volts_to_counts(v, ch, cal) + self._settle_counts(t))
-        return np.clip(c, tables.ADC_MIN, tables.ADC_MAX)
+        c = units.volts_to_counts(v, ch, cal) + self._settle_counts(t)
+        if self.adc_noise_counts > 0:
+            c = c + self._rng.normal(0.0, float(self.adc_noise_counts), np.shape(c))
+        return np.clip(np.rint(c), tables.ADC_MIN, tables.ADC_MAX)
 
     def _to_raw(self, v: FloatArray, t: FloatArray) -> npt.NDArray[np.uint8]:
         return self._adc_counts(v, t).astype(np.uint8)
@@ -700,6 +739,8 @@ class SimulatedDevice:
         v = self.signal.evaluate(t, self._rng)
         if self.config.gain1 & tables.CH1_AC_BIT:
             v = v - self.signal.dc_component()
+        if self.trim_gain != 1.0:
+            v = v * float(self.trim_gain)
         return v
 
     def _input_samples(self, n: int) -> bytes:

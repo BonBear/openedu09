@@ -272,9 +272,12 @@ No x4 upsampling or smoothing happens in the driver; that is a display concern.
 `Calibration` (frozen): `base_ofs=0x80`, `range_corr: dict[float,int]`, `gnd_fit=(k=2.0, b=-128.0)` (fit in the "ad = 255 - raw" domain against the absolute DAC byte, per protocol.md 5.3; 0 V -> raw 127, trigger byte 127),
 `counts_per_div=32`, `adc_inverted=tables.ADC_INVERTED`, `source: "default"|"typical"|"file"|"ini-import"|"measured"`,
 `range_gain: dict[float,float]` (per-range gain correction `g = V_true / V_read`, `0.8 < g < 1.25`, missing = 1.0;
-like `range_corr` excluded from `hash()`, JSON keys are strings) and the reserved `neg_nonlinearity` (opaque JSON
-object or None; round-tripped, part of `calibration_id`, NOT applied; placeholder for a future piecewise
-correction of large negative deflections, protocol.md 11.3). `from_dict` still rejects unknown keys.
+like `range_corr` excluded from `hash()`, JSON keys are strings; since the calibration wizard it is the
+**positive-side** gain), `range_gain_neg` (negative-side gain, missing = `range_gain`), `neg_nonlinearity`
+(per range piecewise-linear knots `(r, e)` of the extra stretch of large negative deflections, applied;
+calibration_wizard.md 1.2) and `meta` (provenance, not part of `calibration_id` or equality). Every counts <->
+volts path goes through `units.deflection_to_volts` / `volts_to_deflection` (exact inverses). Files with only v1
+keys are written as version 1, otherwise 2; `from_dict` still rejects unknown keys.
 Gain: `Calibration.effective_counts_per_div(vdiv) = counts_per_div / range_gain_for(vdiv)` is used by every
 counts <-> volts path (`counts_to_volts` multiplies by g, `volts_to_counts`/`volts_to_raw`/`trigger_byte` divide)
 and by the position -> offset DAC conversion, so the ADC window stays centred on the screen. `level_range_v()`
@@ -282,7 +285,12 @@ and by the position -> offset DAC conversion, so the ADC window stays centred on
 than the screen (it saturates just inside the edges), and an out-of-ADC trigger level is clamped to 0/255. HW-measured gains
 (one unit, 2026-10-25) are `tables.TYPICAL_RANGE_GAIN`, included in `Calibration.typical()`. The offset
 calibration (`measure_calibration`) carries `range_gain`/`neg_nonlinearity` over unchanged;
-`calibration.gain_from_reference` (CLI `edu09-gain`) measures one range against a DC reference.
+`calibration.gain_from_reference` (CLI `edu09-gain`) measures one range against a DC reference. The
+**calibration wizard** (`edu09.calwizard`, spec `docs/specs/calibration_wizard.md`) plans and runs a full
+per-unit calibration (zero + ground map, optional RV1 trimmer step, per-range positive/negative gain and
+negative nonlinearity, fit, save with backup, verify) against the user's multimeter readings; front ends
+`edu09-calibrate` (CLI), the GUI's `CalibrationWizard` (`gui/cal_wizard.py`, Tools > Calibrate) and the MCP
+`calibration_*` tools (`mcp_server/cal_tools.py`).
 `Calibration()` is the idealised model of the original's demo mode; the simulator's front end and the test
 fixtures use it, so sim/replay scopes keep it. Real units have a DAC slope of only ~1.03 counts per step
 (HW-measured 2026-10-24: `base_ofs=0x86`, `range_corr={1 V: -1, 0.1 V: -1}`, `k~1.03`, `b~-9.8`), so with
@@ -311,8 +319,15 @@ divisions to DAC steps through `k`), and the trigger byte from `level_v` via `vo
   writes `calibration.json` atomically (tmp + `os.replace`) after backing up the previous file as
   `calibration.<timestamp>.bak.json`. It never touches the vendor `EDU09.ini`, which can only be imported
   read-only.
-* MCP: the `calibrate` tool is **not registered** unless the server starts with `--allow-calibration`; even
-  then it requires `confirm=true`. `export_csv` only writes inside the export dir (default
+* MCP: the `calibrate` tool and the `calibration_*` wizard tools are **not registered** unless the server
+  starts with `--allow-calibration`; even then `calibrate` and `calibration_finish(save=true)` require
+  `confirm=true`, the zero step requires `input_disconnected=true`, and reference readings must be typed by
+  the human (tool descriptions forbid the agent to invent them; `|reading_v| <= 30` V). One wizard session per
+  server (and per Scope), aborted after 30 min idle and on server shutdown; nothing is installed before save.
+* Calibration wizard: nothing is installed or saved before an explicit save (`save(confirm=True)`), abort is
+  non-blocking (`Scope.abort_exclusive`) and never needs a restore; the GUI runs every session call off the
+  GUI thread and keeps the "input disconnected" confirmation for the zero step. Reversing a source is only
+  offered for floating sources (warning in every plan with a reversible source). `export_csv` only writes inside the export dir (default
   `user_data_dir/edu09/exports`; `..`/absolute paths are rejected).
 * `tools/probe.py` is **read-only by default** (sec. 7.1).
 
@@ -339,7 +354,18 @@ target under 32 KB.
 | `set_running` | `running: bool` | `{state}`: continuous acquisition (feeds GUI and `latest`) |
 | `auto_set` | `timeout_s=5.0` | `{settings, rationale:[str], waveform_id}` |
 | `list_waveforms` | — | `[{waveform_id, timestamp, timebase, volts_per_div}]` (store keeps the last 32) |
-| `calibrate` *(only with `--allow-calibration`)* | `confirm: bool`, `input_disconnected: bool` | `{calibration, backup_path}` |
+| `calibrate` *(only with `--allow-calibration`)* | `confirm: bool`, `input_disconnected: bool` | `{calibration, backup_path}` (offsets only) |
+| `calibration_plan` *(flag)* | `sources: [{label, volts? , min_v?, max_v?, tolerance_pct=5, reversible=false}]` (<= 8), `mode`, `max_abs_v=15`, `trimmer=false` | `{setups, coverage, reconnections, user_actions, estimated_s, warnings}`; pure |
+| `calibration_start` *(flag)* | as plan + `uncalibrated="keep"` | `{session_id, plan, step}`; one session at a time |
+| `calibration_step` *(flag)* | — | `{session_id, step:{state, index, total, setup:{id, kind, instruction, volts, needs}, needs, phase, last_result, live?, sim_reading_v?, warnings}}`; trimmer live phase: one sample per call |
+| `calibration_submit` *(flag)* | `action: measure\|retry\|skip\|done`, `reading_v`, `input_disconnected=false` | `{result?:{status, points:[{vdiv, position_div, deflection_div, err_pct, status, code, message}], messages}, step}` |
+| `calibration_finish` *(flag)* | `save=false`, `confirm=false` | `{preview}`; with `save=true, confirm=true` also `{saved, backup_path, calibration_id, warnings}` |
+| `calibration_abort` *(flag)* | — | `{aborted, log_path}` |
+
+Wizard tool payloads are capped at 8 KB (no raw samples; plan instructions are shortened if needed). Wizard
+tool descriptions say: "Readings must be typed by the human from their multimeter; never invent or estimate
+them. Ask the human to perform every physical step." `edu09-mcp --simulate ... --sim-unit unit1` simulates a
+unit with real gain errors for trying them.
 
 Resources: `edu09://status`, `edu09://capabilities`, `edu09://waveforms/{waveform_id}` (JSON, full
 resolution), `edu09://waveforms/{waveform_id}.csv`. Waveform ids are `"w<seq>"`. Older ids return

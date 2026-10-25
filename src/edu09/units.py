@@ -13,19 +13,28 @@ Volts are ``(raw - gnd_raw) * volts_per_div * gain / counts_per_div``, negated w
 inverted (``Calibration.adc_inverted``, default ``tables.ADC_INVERTED``; open question Q3).
 ``gain = Calibration.range_gain_for(volts_per_div)`` (default 1.0) is the per-range gain correction
 ``V_true / V_read``; equivalently the effective counts per division of a range is
-``counts_per_div / gain`` (``Calibration.effective_counts_per_div``). Every counts <-> volts path
-(``counts_to_volts``, ``volts_to_counts``, ``volts_to_raw``, ``trigger_byte``, the position ->
-offset DAC mapping) uses the effective value.
+``counts_per_div / gain`` (``Calibration.effective_counts_per_div``).
+
+Calibration v2 (docs/specs/calibration_wizard.md 1): above ground the *positive* gain
+``range_gain`` applies; below ground the negative gain ``range_gain_neg`` (falling back to the
+positive one) plus the optional piecewise-linear expansion correction ``neg_nonlinearity``. The
+single place where this happens is :func:`deflection_to_volts` / :func:`volts_to_deflection`
+(exact inverses, strictly increasing, continuous at ground). ``counts_to_volts``,
+``volts_to_counts``, ``volts_to_raw`` and ``trigger_byte`` all go through them. The position ->
+offset DAC mapping keeps the positive effective counts per division. With the v2 fields empty
+every result is bitwise identical to v1.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import EllipsisType
 from typing import Any, Literal, NamedTuple, get_args
 
 import numpy as np
@@ -54,15 +63,21 @@ _CAL_KEYS: frozenset[str] = frozenset(
         "adc_inverted",
         "source",
         "range_gain",
+        "range_gain_neg",
         "neg_nonlinearity",
+        "meta",
     }
 )
+_V2_KEYS: frozenset[str] = frozenset({"range_gain_neg", "neg_nonlinearity", "meta"})
+"""Keys that only exist in calibration file version 2 (``storage.save_calibration``)."""
 
 __all__ = [
     "Calibration",
     "CalibrationSource",
     "GndFit",
+    "Knot",
     "counts_to_volts",
+    "deflection_to_volts",
     "expected_acq_mode",
     "flags_byte",
     "gnd_counts",
@@ -73,9 +88,14 @@ __all__ = [
     "timebase_entry",
     "trigger_byte",
     "trigger_index",
+    "validate_nonlinearity_knots",
     "volts_to_counts",
+    "volts_to_deflection",
     "volts_to_raw",
 ]
+
+Knot = tuple[float, float]
+"""One negative-nonlinearity knot ``(r, e)`` in divisions (see ``Calibration``)."""
 
 CalibrationSource = Literal["default", "typical", "file", "ini-import", "measured"]
 _SOURCES: tuple[str, ...] = get_args(CalibrationSource)
@@ -127,15 +147,26 @@ class Calibration:
     (missing entries mean 0). It is excluded from ``hash()`` (dicts are unhashable) but compared
     by ``==``.
 
-    ``range_gain`` maps a volts/div value to a gain correction ``g = V_true / V_read`` measured
-    against a reference (``tables.RANGE_GAIN_MIN < g < tables.RANGE_GAIN_MAX``; missing entries
-    mean 1.0). Volts are multiplied by ``g``; the effective counts per division is
-    ``counts_per_div / g``. Excluded from ``hash()`` like ``range_corr``.
+    ``range_gain`` maps a volts/div value to the **positive-side** gain correction
+    ``g+ = V_true / V_read`` measured against a reference (``tables.RANGE_GAIN_MIN < g <
+    tables.RANGE_GAIN_MAX``; missing entries mean 1.0). Above ground volts are multiplied by
+    ``g+``; the effective counts per division is ``counts_per_div / g+`` (also used for the
+    position -> offset DAC mapping). Excluded from ``hash()`` like ``range_corr``.
 
-    ``neg_nonlinearity`` is RESERVED for a future optional piecewise correction of large negative
-    deflections (front-end nonlinearity, protocol.md 11.3). This version stores it as opaque JSON
-    data (any JSON object, or ``None`` = absent), round-trips it through :meth:`to_dict` and
-    includes it in :attr:`calibration_id`, but does NOT apply it.
+    ``range_gain_neg`` (v2) is the negative-side linear gain ``g-`` with the same limits. A missing
+    range falls back to ``range_gain_for`` (v1 behaviour: one gain for both sides).
+
+    ``neg_nonlinearity`` (v2) maps a volts/div value to knots ``(r, e)`` (:data:`Knot`) of the
+    negative-side expansion. With ``c >= 0`` counts below ground, ``r = c * g- / counts_per_div``
+    is the linear-corrected read deflection (divisions) and the true deflection is
+    ``d = r - E(r)``: ``E`` is piecewise linear through the knots, 0 for ``r <= r_0`` and
+    extrapolated with the last segment's slope beyond the last knot. Validation rules
+    (:func:`validate_nonlinearity_knots`, limits ``tables.NL_*``): 2..8 knots, ``e_0 == 0``,
+    ``1 <= r_0``, ``r`` strictly increasing and ``<= 10``, ``|e| <= 2`` and every slope
+    ``de/dr`` within +-0.5 (so ``d(r)`` is strictly increasing). ``None`` is accepted as ``{}``.
+
+    ``meta`` (v2) is provenance (a JSON object of at most ``tables.CAL_META_MAX_BYTES``). It is
+    NOT compared, NOT hashed and NOT part of :attr:`calibration_id`.
 
     ``Calibration()`` is the idealised model of the original's demo mode (base 0x80, slope 2
     counts per DAC step: 0 V -> raw 127). The simulator's front end and the test fixtures use it.
@@ -150,7 +181,9 @@ class Calibration:
     adc_inverted: bool = tables.ADC_INVERTED
     source: CalibrationSource = "default"
     range_gain: Mapping[float, float] = field(default_factory=dict, hash=False)
-    neg_nonlinearity: Mapping[str, Any] | None = field(default=None, hash=False)
+    neg_nonlinearity: Mapping[float, tuple[Knot, ...]] = field(default_factory=dict, hash=False)
+    range_gain_neg: Mapping[float, float] = field(default_factory=dict, hash=False)
+    meta: Mapping[str, Any] | None = field(default=None, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         _int_in(self.base_ofs, tables.OFFSET_DAC_MIN, tables.OFFSET_DAC_MAX, "base_ofs")
@@ -179,8 +212,12 @@ class Calibration:
             raise CalibrationError(f"adc_inverted must be a bool, got {self.adc_inverted!r}")
         if self.source not in _SOURCES:
             raise CalibrationError(f"source {self.source!r} not in {_SOURCES}")
-        object.__setattr__(self, "range_gain", _parse_range_gain(self.range_gain))
-        object.__setattr__(self, "neg_nonlinearity", _parse_opaque(self.neg_nonlinearity))
+        object.__setattr__(self, "range_gain", _parse_range_gain(self.range_gain, "range_gain"))
+        object.__setattr__(
+            self, "range_gain_neg", _parse_range_gain(self.range_gain_neg, "range_gain_neg")
+        )
+        object.__setattr__(self, "neg_nonlinearity", _parse_nonlinearity(self.neg_nonlinearity))
+        object.__setattr__(self, "meta", _parse_meta(self.meta))
 
     @classmethod
     def typical(cls) -> Calibration:
@@ -203,11 +240,20 @@ class Calibration:
         return self.range_corr.get(float(vdiv), 0)
 
     def range_gain_for(self, vdiv: VoltsPerDiv | float) -> float:
-        """Gain correction ``V_true / V_read`` of a range (1.0 when not calibrated)."""
+        """Positive-side gain correction ``V_true / V_read`` of a range (1.0 if not calibrated)."""
         return self.range_gain.get(float(vdiv), 1.0)
 
+    def range_gain_neg_for(self, vdiv: VoltsPerDiv | float) -> float:
+        """Negative-side linear gain ``g-`` of a range (falls back to :meth:`range_gain_for`)."""
+        g = self.range_gain_neg.get(float(vdiv))
+        return self.range_gain_for(vdiv) if g is None else g
+
+    def nonlinearity_for(self, vdiv: VoltsPerDiv | float) -> tuple[Knot, ...]:
+        """Negative-side nonlinearity knots ``(r, e)`` of a range (``()`` = none)."""
+        return self.neg_nonlinearity.get(float(vdiv), ())
+
     def effective_counts_per_div(self, vdiv: VoltsPerDiv | float) -> float:
-        """Raw counts per (true) division of a range: ``counts_per_div / range_gain_for``."""
+        """Raw counts per (true) division above ground: ``counts_per_div / range_gain_for``."""
         return self.counts_per_div / self.range_gain_for(vdiv)
 
     def with_range_gain(self, gains: Mapping[Any, float]) -> Calibration:
@@ -216,10 +262,44 @@ class Calibration:
         merged.update({float(VoltsPerDiv.parse(k)): v for k, v in gains.items()})
         return dataclasses.replace(self, range_gain=merged)
 
+    def with_gains(
+        self,
+        *,
+        pos: Mapping[Any, float | None] | None = None,
+        neg: Mapping[Any, float | None] | None = None,
+        nonlinearity: Mapping[Any, Sequence[Sequence[float]] | None] | None = None,
+        meta: Mapping[str, Any] | None | EllipsisType = ...,
+    ) -> Calibration:
+        """Copy with per-range merges into ``range_gain`` (``pos``), ``range_gain_neg`` (``neg``)
+        and ``neg_nonlinearity`` (``nonlinearity``). A value of ``None`` (or an empty knot list)
+        removes that range's key. ``meta`` replaces the provenance unless left at ``...``
+        (keep). Keys are anything ``VoltsPerDiv.parse`` accepts. Raises ``CalibrationError``."""
+        changes: dict[str, Any] = {
+            "range_gain": _merge(self.range_gain, pos, "range_gain"),
+            "range_gain_neg": _merge(self.range_gain_neg, neg, "range_gain_neg"),
+            "neg_nonlinearity": _merge(self.neg_nonlinearity, nonlinearity, "neg_nonlinearity"),
+        }
+        if not isinstance(meta, EllipsisType):
+            changes["meta"] = meta
+        return dataclasses.replace(self, **changes)
+
+    def without_gain_correction(self) -> Calibration:
+        """Copy with all gain maps (``range_gain``, ``range_gain_neg``, ``neg_nonlinearity``)
+        empty and ``meta=None``: the raw front end, used for every gain measurement."""
+        return dataclasses.replace(
+            self, range_gain={}, range_gain_neg={}, neg_nonlinearity={}, meta=None
+        )
+
+    @property
+    def has_v2_fields(self) -> bool:
+        """True if any calibration-file-v2-only field is set (``storage`` then writes v2)."""
+        return bool(self.range_gain_neg or self.neg_nonlinearity or self.meta)
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly dict (``range_corr``/``range_gain`` keys become strings such as ``"0.1"``).
 
-        ``neg_nonlinearity`` is only present when set (reserved, opaque).
+        The v2 keys ``range_gain_neg``, ``neg_nonlinearity`` (``{"0.5": [[4.0, 0.0], ...]}``)
+        and ``meta`` are only present when non-empty, so a v1 calibration keeps its v1 dict.
         """
         d: dict[str, Any] = {
             "base_ofs": self.base_ofs,
@@ -230,15 +310,23 @@ class Calibration:
             "source": self.source,
             "range_gain": {f"{k:g}": v for k, v in sorted(self.range_gain.items())},
         }
-        if self.neg_nonlinearity is not None:
-            d["neg_nonlinearity"] = json.loads(json.dumps(self.neg_nonlinearity))
+        if self.range_gain_neg:
+            d["range_gain_neg"] = {f"{k:g}": v for k, v in sorted(self.range_gain_neg.items())}
+        if self.neg_nonlinearity:
+            d["neg_nonlinearity"] = {
+                f"{k:g}": [[r, e] for r, e in knots]
+                for k, knots in sorted(self.neg_nonlinearity.items())
+            }
+        if self.meta:
+            d["meta"] = json.loads(json.dumps(self.meta))
         return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> Calibration:
         """Inverse of :meth:`to_dict`. Missing keys take defaults; bad data -> CalibrationError.
 
-        Unknown keys are rejected; the reserved ``neg_nonlinearity`` key is accepted (opaque).
+        Unknown keys are rejected (also legacy opaque ``neg_nonlinearity`` data that does not
+        follow the knot format).
         """
         if not isinstance(d, Mapping):
             raise CalibrationError(f"calibration must be a mapping, got {type(d).__name__}")
@@ -256,47 +344,127 @@ class Calibration:
 
     @property
     def calibration_id(self) -> str:
-        """Stable id ``"<source>:<10 hex>"`` derived from the calibration values."""
-        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        """Stable id ``"<source>:<10 hex>"`` derived from the calibration values (not ``meta``)."""
+        d = self.to_dict()
+        d.pop("meta", None)
+        payload = json.dumps(d, sort_keys=True, separators=(",", ":"))
         return f"{self.source}:{hashlib.sha256(payload.encode()).hexdigest()[:10]}"
 
 
-def _parse_range_gain(value: object) -> dict[float, float]:
+def _vdiv_key(key: object, what: str) -> float:
+    try:
+        return float(VoltsPerDiv.parse(key))
+    except (ValueError, TypeError) as exc:
+        raise CalibrationError(f"{what} key: {exc}") from None
+
+
+def _merge(
+    current: Mapping[float, Any], updates: Mapping[Any, Any] | None, what: str
+) -> dict[float, Any]:
+    merged: dict[float, Any] = dict(current)
+    if updates is None:
+        return merged
+    if not isinstance(updates, Mapping):
+        raise CalibrationError(f"{what} updates must be a mapping of volts/div -> value")
+    for key, val in updates.items():
+        vdiv = _vdiv_key(key, what)
+        if val is None or (isinstance(val, Sequence) and not isinstance(val, str) and not val):
+            merged.pop(vdiv, None)
+        else:
+            merged[vdiv] = val
+    return merged
+
+
+def _parse_range_gain(value: object, what: str = "range_gain") -> dict[float, float]:
     if not isinstance(value, Mapping):
-        raise CalibrationError("range_gain must be a mapping of volts/div -> float")
+        raise CalibrationError(f"{what} must be a mapping of volts/div -> float")
     gains: dict[float, float] = {}
     for key, val in value.items():
-        try:
-            vdiv = float(VoltsPerDiv.parse(key))
-        except ValueError as exc:
-            raise CalibrationError(f"range_gain key: {exc}") from None
+        vdiv = _vdiv_key(key, what)
         if isinstance(val, bool) or not isinstance(val, int | float):
-            raise CalibrationError(f"range_gain[{vdiv:g}] must be a number, got {val!r}")
+            raise CalibrationError(f"{what}[{vdiv:g}] must be a number, got {val!r}")
         g = float(val)
         if not tables.RANGE_GAIN_MIN < g < tables.RANGE_GAIN_MAX:  # also rejects NaN
             raise CalibrationError(
-                f"range_gain[{vdiv:g}] {g!r} out of range "
+                f"{what}[{vdiv:g}] {g!r} out of range "
                 f"({tables.RANGE_GAIN_MIN:g}, {tables.RANGE_GAIN_MAX:g})"
             )
         gains[vdiv] = g
     return gains
 
 
-def _parse_opaque(value: object) -> dict[str, Any] | None:
-    """Reserved opaque JSON object (deep-copied through JSON so it stays serialisable)."""
+def validate_nonlinearity_knots(knots: object, what: str = "knots") -> tuple[Knot, ...]:
+    """Validate and normalise negative-nonlinearity knots ``[(r, e), ...]`` (``Calibration``
+    docstring / ``tables.NL_*``). Returns a tuple of float pairs; raises ``CalibrationError``."""
+    if isinstance(knots, str | bytes) or not isinstance(knots, Sequence):
+        raise CalibrationError(f"{what} must be a list of [r, e] pairs, got {knots!r}")
+    pts: list[Knot] = []
+    for item in knots:
+        if isinstance(item, str | bytes) or not isinstance(item, Sequence) or len(item) != 2:
+            raise CalibrationError(f"{what}: each knot must be [r, e], got {item!r}")
+        vals: list[float] = []
+        for x in item:
+            if isinstance(x, bool) or not isinstance(x, int | float) or not math.isfinite(x):
+                raise CalibrationError(f"{what}: knot values must be finite numbers, got {item!r}")
+            vals.append(float(x))
+        pts.append((vals[0], vals[1]))
+    if not 2 <= len(pts) <= tables.NL_MAX_KNOTS:
+        raise CalibrationError(f"{what}: need 2..{tables.NL_MAX_KNOTS} knots, got {len(pts)}")
+    r0, e0 = pts[0]
+    if e0 != 0.0:
+        raise CalibrationError(f"{what}: the first knot's excess must be 0, got {e0!r}")
+    if r0 < tables.NL_MIN_READ_DIV:
+        raise CalibrationError(f"{what}: first knot r={r0:g} < {tables.NL_MIN_READ_DIV:g} div")
+    for r, e in pts:
+        if r > tables.NL_MAX_READ_DIV:
+            raise CalibrationError(f"{what}: knot r={r:g} > {tables.NL_MAX_READ_DIV:g} div")
+        if abs(e) > tables.NL_MAX_EXCESS_DIV:
+            raise CalibrationError(
+                f"{what}: knot excess {e:g} beyond +-{tables.NL_MAX_EXCESS_DIV:g} div"
+            )
+    for (ra, ea), (rb, eb) in itertools.pairwise(pts):
+        if not rb > ra:
+            raise CalibrationError(f"{what}: knot r must be strictly increasing ({ra:g}, {rb:g})")
+        slope = (eb - ea) / (rb - ra)
+        if not -tables.NL_MAX_SLOPE <= slope <= tables.NL_MAX_SLOPE:
+            raise CalibrationError(
+                f"{what}: segment slope {slope:.3g} beyond +-{tables.NL_MAX_SLOPE:g} "
+                f"(between r={ra:g} and r={rb:g})"
+            )
+    return tuple(pts)
+
+
+def _parse_nonlinearity(value: object) -> dict[float, tuple[Knot, ...]]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise CalibrationError(
+            "neg_nonlinearity must be a mapping of volts/div -> [[r, e], ...], "
+            f"got {type(value).__name__}"
+        )
+    out: dict[float, tuple[Knot, ...]] = {}
+    for key, knots in value.items():
+        vdiv = _vdiv_key(key, "neg_nonlinearity")
+        out[vdiv] = validate_nonlinearity_knots(knots, f"neg_nonlinearity[{vdiv:g}]")
+    return out
+
+
+def _parse_meta(value: object) -> dict[str, Any] | None:
+    """Provenance JSON object (deep-copied through JSON; at most ``CAL_META_MAX_BYTES``)."""
     if value is None:
         return None
     if not isinstance(value, Mapping):
-        raise CalibrationError(
-            f"neg_nonlinearity must be a JSON object or null, got {type(value).__name__}"
-        )
+        raise CalibrationError(f"meta must be a JSON object or null, got {type(value).__name__}")
     try:
-        copied = json.loads(json.dumps(value, allow_nan=False))
+        text = json.dumps(value, allow_nan=False, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
-        raise CalibrationError(f"neg_nonlinearity is not JSON-serialisable: {exc}") from None
-    if not isinstance(copied, dict):  # pragma: no cover - a Mapping always dumps as an object
-        raise CalibrationError("neg_nonlinearity must be a JSON object")
-    return copied
+        raise CalibrationError(f"meta is not JSON-serialisable: {exc}") from None
+    if len(text.encode()) > tables.CAL_META_MAX_BYTES:
+        raise CalibrationError(
+            f"meta is {len(text.encode())} bytes as JSON (max {tables.CAL_META_MAX_BYTES})"
+        )
+    copied = json.loads(text)
+    return copied or None
 
 
 # --------------------------------------------------------------------------------------------
@@ -364,9 +532,84 @@ def gnd_counts(ch: ChannelSettings, cal: Calibration) -> float:
     return _ADC_FULL - (cal.gnd_fit.k * dac + cal.gnd_fit.b)
 
 
-def _volts_per_count(ch: ChannelSettings, cal: Calibration) -> float:
-    vpc = float(ch.volts_per_div) / cal.effective_counts_per_div(ch.volts_per_div)
-    return -vpc if cal.adc_inverted else vpc
+def _vpc_pos_neg(vdiv: float, cal: Calibration) -> tuple[float, float]:
+    """Volts per count above / below ground (same operation order as v1: bitwise identical)."""
+    pos = vdiv / cal.effective_counts_per_div(vdiv)
+    neg = vdiv / (cal.counts_per_div / cal.range_gain_neg_for(vdiv))
+    return pos, neg
+
+
+def _scalar_like(x: npt.ArrayLike) -> FloatArray:
+    """0-d results become ``np.float64`` scalars (as v1 returned for scalar input)."""
+    arr = np.asarray(x, dtype=np.float64)
+    return arr[()] if arr.ndim == 0 else arr
+
+
+def _knot_arrays(knots: tuple[Knot, ...]) -> tuple[FloatArray, FloatArray, float]:
+    rk = np.array([k[0] for k in knots], dtype=np.float64)
+    ek = np.array([k[1] for k in knots], dtype=np.float64)
+    tail = float((ek[-1] - ek[-2]) / (rk[-1] - rk[-2]))
+    return rk, ek, tail
+
+
+def _nl_excess(r: FloatArray, knots: tuple[Knot, ...]) -> FloatArray:
+    """``E(r)``: 0 for ``r <= r_0``, linear through the knots, last slope beyond the last knot."""
+    rk, ek, tail = _knot_arrays(knots)
+    inner = np.interp(r, rk, ek)  # left of r_0: e_0 == 0
+    return np.where(r > rk[-1], ek[-1] + tail * (r - rk[-1]), inner)
+
+
+def _nl_read(d: FloatArray, knots: tuple[Knot, ...]) -> FloatArray:
+    """Inverse of ``d = r - E(r)``: true deflection -> read deflection (knots ``(r-e, r)``)."""
+    rk, ek, tail = _knot_arrays(knots)
+    dk = rk - ek  # strictly increasing: every slope de/dr <= NL_MAX_SLOPE < 1
+    inner = np.interp(d, dk, rk)
+    r = np.where(d > dk[-1], rk[-1] + (d - dk[-1]) / (1.0 - tail), inner)
+    return np.where(d < dk[0], d, r)  # dk[0] == rk[0] (e_0 == 0): identity below the first knot
+
+
+def deflection_to_volts(
+    dev_counts: npt.ArrayLike, vdiv: VoltsPerDiv | float, cal: Calibration
+) -> FloatArray:
+    """Counts relative to ground (``+`` = more positive volts) -> volts, the single place where
+    the per-range gains and the negative nonlinearity are applied.
+
+    ``dev >= 0``: ``v = dev * vdiv * g+ / cpd``. ``dev < 0``: ``r = -dev * g- / cpd`` (read
+    deflection in divisions) and ``v = -(r - E(r)) * vdiv`` (``E`` from
+    ``Calibration.nonlinearity_for``). Vectorised float64; strictly increasing and continuous at
+    0; :func:`volts_to_deflection` is its exact inverse.
+    """
+    dev = np.asarray(dev_counts, dtype=np.float64)
+    v = float(vdiv)
+    vpc_pos, vpc_neg = _vpc_pos_neg(v, cal)
+    out = dev * np.where(dev >= 0, vpc_pos, vpc_neg)
+    knots = cal.nonlinearity_for(v)
+    if knots:
+        neg = dev < 0
+        r = np.where(neg, -dev * (cal.range_gain_neg_for(v) / cal.counts_per_div), 0.0)
+        out = out + np.where(neg, _nl_excess(r, knots) * v, 0.0)
+    return _scalar_like(out)
+
+
+def volts_to_deflection(
+    volts: npt.ArrayLike, vdiv: VoltsPerDiv | float, cal: Calibration
+) -> FloatArray:
+    """Volts -> counts relative to ground (exact inverse of :func:`deflection_to_volts`)."""
+    vv = np.asarray(volts, dtype=np.float64)
+    v = float(vdiv)
+    vpc_pos, vpc_neg = _vpc_pos_neg(v, cal)
+    out = vv / np.where(vv >= 0, vpc_pos, vpc_neg)
+    knots = cal.nonlinearity_for(v)
+    if knots:
+        d = np.where(vv < 0, -vv / v, 0.0)
+        bent = d > knots[0][0]
+        r = _nl_read(d, knots)
+        out = np.where(bent, -r * (cal.counts_per_div / cal.range_gain_neg_for(v)), out)
+    return _scalar_like(out)
+
+
+def _sign(cal: Calibration) -> float:
+    return -1.0 if cal.adc_inverted else 1.0
 
 
 def counts_to_volts(raw: npt.ArrayLike, ch: ChannelSettings, cal: Calibration) -> FloatArray:
@@ -374,13 +617,13 @@ def counts_to_volts(raw: npt.ArrayLike, ch: ChannelSettings, cal: Calibration) -
     arr = np.asarray(raw, dtype=np.float64)
     if ch.coupling is Coupling.GND:
         return np.zeros_like(arr)
-    return (arr - gnd_counts(ch, cal)) * _volts_per_count(ch, cal)
+    return deflection_to_volts((arr - gnd_counts(ch, cal)) * _sign(cal), ch.volts_per_div, cal)
 
 
 def volts_to_counts(volts: npt.ArrayLike, ch: ChannelSettings, cal: Calibration) -> FloatArray:
     """Volts -> raw counts as float64, unrounded and unclipped (exact inverse of the DC path)."""
-    v = np.asarray(volts, dtype=np.float64)
-    return v / _volts_per_count(ch, cal) + gnd_counts(ch, cal)
+    dev = volts_to_deflection(volts, ch.volts_per_div, cal)
+    return gnd_counts(ch, cal) + _sign(cal) * dev
 
 
 def volts_to_raw(

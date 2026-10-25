@@ -164,6 +164,26 @@ RANGE_GAIN_MIN: Final = 0.8
 RANGE_GAIN_MAX: Final = 1.25
 """Accepted gain corrections are ``RANGE_GAIN_MIN < gain < RANGE_GAIN_MAX`` (exclusive)."""
 
+# Negative-side nonlinearity (calibration v2, protocol.md 11.3). Per range, knots ``(r, e)`` of the
+# excess ``E`` in the linear-corrected read domain: ``r = counts_below_ground * g- / cpd``
+# (divisions), true deflection ``d = r - E(r)``; ``E`` is piecewise linear, 0 for ``r <= r_0``,
+# extrapolated with the last segment's slope. Validation limits (``units.Calibration``):
+NL_MAX_KNOTS: Final = 8
+"""At most this many knots per range (and at least 2)."""
+NL_MIN_READ_DIV: Final = 1.0
+"""The first knot's ``r`` must be at least this (no correction near ground)."""
+NL_MAX_READ_DIV: Final = 10.0
+"""Every knot's ``r`` must be at most this (divisions)."""
+NL_MAX_EXCESS_DIV: Final = 2.0
+"""``|e| <= NL_MAX_EXCESS_DIV`` for every knot (divisions)."""
+NL_MAX_SLOPE: Final = 0.5
+"""Every segment slope ``de/dr`` (and so the extrapolated tail) is within +-``NL_MAX_SLOPE``; then
+``dd/dr >= 0.5``: the mapping is strictly monotonic and well conditioned."""
+CAL_META_MAX_BYTES: Final = 8192
+"""``Calibration.meta`` (provenance) is at most this many bytes as compact JSON."""
+INPUT_ABS_MAX_V: Final = 30.0
+"""Maximum input voltage magnitude (the calibration wizard caps references at this)."""
+
 # Neutral CH2 bytes (architecture.md 4.1: CH2 not modelled -> DC, 2 V/div, offset 0x80). Q9.
 CH2_NEUTRAL_CFG: Final = GAIN_CODES_CH2[2.0] | CH2_DC_BIT  # 0x29
 CH2_NEUTRAL_OFS: Final = OFFSET_DAC_DEFAULT

@@ -30,6 +30,10 @@ from .units import Calibration, GndFit
 APP_NAME = "edu09"
 CALIBRATION_FILENAME = "calibration.json"
 CALIBRATION_FILE_VERSION = 1
+"""File version of calibrations without v2-only fields (readable by older builds)."""
+CALIBRATION_FILE_VERSION_V2 = 2
+"""File version written when ``range_gain_neg`` / ``neg_nonlinearity`` / ``meta`` are present."""
+CALIBRATION_FILE_VERSIONS = (CALIBRATION_FILE_VERSION, CALIBRATION_FILE_VERSION_V2)
 DEFAULT_STORE_CAPACITY = 32  # architecture.md section 6: "store keeps the last 32"
 INI_SECTION = "Calibration"  # protocol.md 5.4 step 5
 CSV_COLUMNS = ("t_s", "volts", "raw")
@@ -77,10 +81,17 @@ def _atomic_write_text(path: Path, text: str) -> None:
 # --------------------------------------------------------------------------------------------
 
 
+def calibration_file_version(cal: Calibration) -> int:
+    """2 if ``cal`` uses a v2-only field (``range_gain_neg``, ``neg_nonlinearity``, ``meta``),
+    else 1 (offset/gain-only files stay readable by older builds)."""
+    return CALIBRATION_FILE_VERSION_V2 if cal.has_v2_fields else CALIBRATION_FILE_VERSION
+
+
 def save_calibration(cal: Calibration, path: str | os.PathLike[str] | None = None) -> Path:
-    """Atomically write ``cal`` as JSON (``{"version": 1, "calibration": {...}}``)."""
+    """Atomically write ``cal`` as JSON (``{"version": 1|2, "calibration": {...}}``, see
+    :func:`calibration_file_version`)."""
     target = Path(path) if path is not None else default_calibration_path()
-    doc = {"version": CALIBRATION_FILE_VERSION, "calibration": cal.to_dict()}
+    doc = {"version": calibration_file_version(cal), "calibration": cal.to_dict()}
     _atomic_write_text(target, json.dumps(doc, indent=2, sort_keys=True) + "\n")
     return target
 
@@ -89,7 +100,8 @@ def load_calibration(path: str | os.PathLike[str] | None = None) -> Calibration:
     """Load a calibration file. A missing file gives the default ``Calibration()``.
 
     Raises ``CalibrationError`` for unreadable/invalid content. A bare ``to_dict()`` mapping
-    (without the version wrapper) is accepted too.
+    (without the version wrapper) is accepted too. Versions 1 and 2 are accepted; the parser
+    ignores the number (the schema is the union, unknown keys are still rejected).
     """
     target = Path(path) if path is not None else default_calibration_path()
     try:
@@ -104,7 +116,7 @@ def load_calibration(path: str | os.PathLike[str] | None = None) -> Calibration:
         raise CalibrationError(f"calibration file {target} is not valid JSON: {exc}") from exc
     if isinstance(doc, Mapping) and "calibration" in doc:
         version = doc.get("version")
-        if version != CALIBRATION_FILE_VERSION:
+        if isinstance(version, bool) or version not in CALIBRATION_FILE_VERSIONS:
             raise CalibrationError(f"unsupported calibration file version {version!r}")
         doc = doc["calibration"]
     return Calibration.from_dict(doc)
@@ -302,11 +314,15 @@ class WaveformStore:
 
 __all__ = [
     "CALIBRATION_FILENAME",
+    "CALIBRATION_FILE_VERSION",
+    "CALIBRATION_FILE_VERSIONS",
+    "CALIBRATION_FILE_VERSION_V2",
     "CSV_COLUMNS",
     "DEFAULT_STORE_CAPACITY",
     "WaveformNotFound",
     "WaveformStore",
     "backup_calibration",
+    "calibration_file_version",
     "default_calibration_path",
     "default_config_dir",
     "default_data_dir",

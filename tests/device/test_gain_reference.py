@@ -111,7 +111,7 @@ def test_gain_from_reference_rejects_wrong_reference() -> None:
 
 
 def test_offset_calibration_keeps_gain_and_reserved_data() -> None:
-    nl = {"version": 1, "todo": True}
+    nl = {0.5: ((4.0, 0.0), (5.083, 0.083), (6.315, 0.315))}
     host = units.Calibration(range_gain={0.5: 0.974}, neg_nonlinearity=nl)
     with _open("dc:0v:noise=40mv", host=host) as sc:
         cal = measure_calibration(sc)

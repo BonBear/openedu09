@@ -58,6 +58,7 @@ log = logging.getLogger(__name__)
 MCP_SERVER_MODULE = "edu09.mcp_server.server"
 AUTOSET_MODULE = "edu09.device.autoset"
 CALIBRATION_MODULE = "edu09.device.calibration"
+CALWIZARD_MODULE = "edu09.calwizard"
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_MCP_PORT = 8765
 SINGLE_TIMEOUT_S = 10.0
@@ -76,6 +77,22 @@ CALIBRATION_TEXT = (
     "DISCONNECT THE PROBE / INPUT SIGNAL from CH1 now.\n\n"
     "Is the input disconnected and do you want to calibrate?"
 )
+
+
+class _SessionAbort(threading.Event):
+    """``_job_abort`` stand-in for the calibration wizard: ``set()`` also aborts the wizard's
+    session (thread-safe, non-blocking), so the existing "quit anyway" path ends it."""
+
+    def __init__(self, abort: Any) -> None:
+        super().__init__()
+        self._abort = abort
+
+    def set(self) -> None:
+        super().set()
+        try:
+            self._abort()
+        except Exception:
+            log.warning("could not abort the calibration session", exc_info=True)
 
 
 def module_available(name: str) -> bool:
@@ -130,6 +147,10 @@ class MainWindow(QMainWindow):
         self._measure_dirty = False
         self._disconnected_since: float | None = None
         self.last_autoset: Any = None
+        self.cal_wizard: Any = None
+        #: where the calibration wizard saves (None: the scope's calibration file; sim scopes
+        #: then only apply the result)
+        self.calibration_wizard_path: Path | None = None
         self._last_log: tuple[str, float] = ("", 0.0)
 
         status = self.scope.status
@@ -219,7 +240,7 @@ class MainWindow(QMainWindow):
             self.controls.set_autoset_available(False, "Auto-set is not available in this build")
             self.autoset_action.setEnabled(False)
             self.autoset_action.setToolTip("Auto-set is not available in this build")
-        if not module_available(CALIBRATION_MODULE):
+        if not self._calibration_available():
             self.calibrate_action.setEnabled(False)
             self.calibrate_action.setToolTip("Calibration is not available in this build")
         if not module_available(MCP_SERVER_MODULE):
@@ -287,7 +308,11 @@ class MainWindow(QMainWindow):
         tools.addAction(self.mcp_action)
         tools.addSeparator()
         self.calibrate_action = QAction("&Calibrate…", self)
-        self.calibrate_action.triggered.connect(lambda: self.calibrate())
+        self.calibrate_action.setToolTip(
+            "Calibration wizard: zero (input disconnected) and per-range gain against your "
+            "multimeter"
+        )
+        self.calibrate_action.triggered.connect(lambda: self.open_calibration_wizard())
         tools.addAction(self.calibrate_action)
 
     # -- logging / notices -----------------------------------------------------------------------
@@ -502,7 +527,7 @@ class MainWindow(QMainWindow):
         if not busy:
             self._job_abort = None
         self.controls.set_busy(busy)
-        self.calibrate_action.setEnabled(not busy and module_available(CALIBRATION_MODULE))
+        self.calibrate_action.setEnabled(not busy and self._calibration_available())
         self.autoset_action.setEnabled(
             not busy and self._connected and module_available(AUTOSET_MODULE)
         )
@@ -514,6 +539,10 @@ class MainWindow(QMainWindow):
     def _close_if_quit_pending(self) -> None:
         if self._quit_pending and not self._busy and not self._shut_down:
             self.close()
+
+    @staticmethod
+    def _calibration_available() -> bool:
+        return module_available(CALIBRATION_MODULE) and module_available(CALWIZARD_MODULE)
 
     @property
     def busy_job(self) -> str | None:
@@ -609,6 +638,45 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Calibrating… keep the input disconnected")
         self.adapter.call_background(job, done, failed, what="calibration")
         return True
+
+    def open_calibration_wizard(self) -> Any:
+        """Open the calibration wizard (window-modal, non-blocking). Returns it, or None if
+        another job is running.
+
+        While it is open the window is busy ("calibration"); "quit anyway" on close aborts the
+        wizard's session. Continuous acquisition is resumed on close if it was running.
+        """
+        if self._busy:
+            return None
+        from edu09.gui.cal_wizard import CalibrationWizard
+
+        was_running = self._running
+        wiz = CalibrationWizard(
+            self.scope, self.adapter, self, calibration_path=self.calibration_wizard_path
+        )
+        self.cal_wizard = wiz
+        self._job_abort = _SessionAbort(wiz.abort_session)
+        self._set_busy(True, "calibration")
+        self.statusBar().showMessage("Calibration wizard open")
+        wiz.finished.connect(lambda _result: self._on_wizard_closed(wiz, was_running))
+        wiz.show()
+        return wiz
+
+    def _on_wizard_closed(self, wiz: Any, was_running: bool) -> None:
+        if self.cal_wizard is wiz:
+            self.cal_wizard = None
+        if self._shut_down:
+            return
+        sess = getattr(wiz, "session", None)
+        state = str(getattr(sess, "state", "not started"))
+        saved = getattr(wiz.preview_page, "saved", None)
+        if saved is not None:
+            self.notify(f"Calibration saved ({saved.calibration_id}); wizard closed ({state})")
+        else:
+            self.notify(f"Calibration wizard closed ({state}); calibration unchanged")
+        self._set_busy(False)
+        if was_running and not self.scope.closed and not self.scope.running:
+            self.adapter.run()
 
     def displayed_waveform(self) -> Waveform | None:
         return self._shown if self._shown is not None else self.scope.latest()
@@ -774,6 +842,10 @@ class MainWindow(QMainWindow):
                 self.scope.abort_exclusive()
             except Exception:
                 log.warning("could not abort the running job", exc_info=True)
+        wiz, self.cal_wizard = self.cal_wizard, None
+        if wiz is not None:  # its session was aborted above; close it without asking
+            wiz.closing = True
+            wiz.reject()
         self.adapter.shutdown(wait=False)
 
     def confirm_close_while_busy(self, what: str) -> CloseChoice:

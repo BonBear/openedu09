@@ -1,0 +1,349 @@
+{
+ "description": "Gain measurements on one EDU09 unit (fw 1.01), 2026-10-25. Reference = multimeter, DC, 5 ms/div, 3-4 frames averaged. counts_per_div = (measured ground raw - level raw) / divisions; ground measured with 0 V applied at the same range/position. Nominal 32.",
+ "positive_counts_per_div": {
+  "0.1": 32.42,
+  "0.2": 32.82,
+  "0.5": 32.85,
+  "1": 32.13,
+  "2": 32.62,
+  "5": 32.69
+ },
+ "negative_counts_per_div_by_deflection": {
+  "0.5": [
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 32.9,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 32.93,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 33.0,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 33.15,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.79,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.84,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.88,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 33.04,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 3.01,
+    "counts_per_div": 32.94,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 3.01,
+    "counts_per_div": 33.0,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 3.01,
+    "counts_per_div": 33.04,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 3.01,
+    "counts_per_div": 33.05,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 4.0,
+    "counts_per_div": 33.0,
+    "position_div": 3.0
+   },
+   {
+    "div_below_ground": 4.0,
+    "counts_per_div": 33.04,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 4.0,
+    "counts_per_div": 33.04,
+    "position_div": 4.0
+   },
+   {
+    "div_below_ground": 4.0,
+    "counts_per_div": 33.07,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 4.0,
+    "counts_per_div": 33.09,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 5.0,
+    "counts_per_div": 33.44,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 5.0,
+    "counts_per_div": 33.55,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 5.0,
+    "counts_per_div": 33.55,
+    "position_div": 4.0
+   },
+   {
+    "div_below_ground": 5.0,
+    "counts_per_div": 33.61,
+    "position_div": 3.0
+   },
+   {
+    "div_below_ground": 6.0,
+    "counts_per_div": 34.71,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 6.0,
+    "counts_per_div": 34.74,
+    "position_div": 4.0
+   },
+   {
+    "div_below_ground": 6.0,
+    "counts_per_div": 34.75,
+    "position_div": 3.0
+   }
+  ],
+  "0.2": [
+   {
+    "div_below_ground": 2.49,
+    "counts_per_div": 32.92,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 2.49,
+    "counts_per_div": 33.12,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 2.49,
+    "counts_per_div": 33.14,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 2.49,
+    "counts_per_div": 33.21,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 5.0,
+    "counts_per_div": 33.54,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 5.0,
+    "counts_per_div": 33.58,
+    "position_div": 2.0
+   }
+  ],
+  "1.0": [
+   {
+    "div_below_ground": 0.5,
+    "counts_per_div": 32.57,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 0.5,
+    "counts_per_div": 32.59,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 0.5,
+    "counts_per_div": 32.63,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 0.5,
+    "counts_per_div": 32.88,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 32.42,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 32.42,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 32.46,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 1.0,
+    "counts_per_div": 32.47,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.38,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.41,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.44,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.5,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.27,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.28,
+    "position_div": 3.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.31,
+    "position_div": 4.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.35,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.41,
+    "position_div": 0.0
+   },
+   {
+    "div_below_ground": 2.0,
+    "counts_per_div": 32.48,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 2.5,
+    "counts_per_div": 32.19,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 2.5,
+    "counts_per_div": 32.24,
+    "position_div": 4.0
+   },
+   {
+    "div_below_ground": 2.5,
+    "counts_per_div": 32.26,
+    "position_div": 3.0
+   },
+   {
+    "div_below_ground": 2.5,
+    "counts_per_div": 32.36,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 2.5,
+    "counts_per_div": 32.36,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 3.0,
+    "counts_per_div": 32.22,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 3.0,
+    "counts_per_div": 32.27,
+    "position_div": 4.0
+   },
+   {
+    "div_below_ground": 3.0,
+    "counts_per_div": 32.29,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 3.0,
+    "counts_per_div": 32.35,
+    "position_div": 3.0
+   },
+   {
+    "div_below_ground": 3.0,
+    "counts_per_div": 32.36,
+    "position_div": 1.0
+   }
+  ],
+  "0.1": [
+   {
+    "div_below_ground": 4.99,
+    "counts_per_div": 32.47,
+    "position_div": 2.0
+   },
+   {
+    "div_below_ground": 4.99,
+    "counts_per_div": 32.52,
+    "position_div": 3.5
+   }
+  ],
+  "2.0": [
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.45,
+    "position_div": 4.0
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.55,
+    "position_div": 1.0
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.75,
+    "position_div": 3.0
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.84,
+    "position_div": 3.5
+   },
+   {
+    "div_below_ground": 1.5,
+    "counts_per_div": 32.85,
+    "position_div": 2.0
+   }
+  ]
+ },
+ "ground_check_0V": "measured ground matches calibration fit within ~1 count at all ranges and positions -4..+4"
+}

@@ -142,6 +142,11 @@ class RecordingTransport:
         self._fh: IO[str] | None = None
         self.info = inner.info
 
+    @property
+    def inner(self) -> Transport:
+        """The wrapped transport (read-only; e.g. to reach a ``SimTransport``'s device)."""
+        return self._inner
+
     def _log(self, direction: str, data: bytes, note: str = "") -> None:
         if self._fh is None:
             return

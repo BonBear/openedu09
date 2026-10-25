@@ -49,10 +49,12 @@ def test_tool_list_without_calibration(server: FastMCP) -> None:
 
 
 def test_tool_list_with_calibration_registers_it_last(mcp_scope: Scope) -> None:
+    from edu09.mcp_server.cal_tools import CAL_TOOL_NAMES
+
     srv = build_server(mcp_scope, ServerOptions(allow_calibration=True))
     names = _tool_names(srv)
-    assert names == list(TOOL_NAMES)
-    assert names[-1] == "calibrate"
+    assert names == list(TOOL_NAMES) + list(CAL_TOOL_NAMES)  # the wizard tools follow
+    assert names[len(TOOL_NAMES) - 1] == "calibrate"
 
 
 def test_schemas_have_expected_params(server: FastMCP) -> None:

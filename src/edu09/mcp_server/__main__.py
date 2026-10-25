@@ -6,6 +6,7 @@ Examples::
     edu09-mcp --simulate "sine:1khz:2vpp"       # stdio, simulated scope
     edu09-mcp --http --port 8765                # http://127.0.0.1:8765/mcp
     edu09-mcp --record usb.jsonl                # append every USB report to usb.jsonl (debug)
+    edu09-mcp --simulate dc:0v --sim-unit unit1 --allow-calibration   # try the wizard tools
 
 Bridge: if the device is owned by another process (e.g. the GUI) that serves MCP over HTTP
 (its URL is in ``owner.json``), stdio ``edu09-mcp`` forwards every request to it instead of
@@ -97,7 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--allow-calibration",
         action="store_true",
-        help="register the 'calibrate' tool (still needs confirm=true and a disconnected input)",
+        help="register the 'calibrate' tool and the calibration wizard tools "
+        "('calibration_*'; saving still needs confirm=true, readings come from the human)",
+    )
+    p.add_argument(
+        "--sim-unit",
+        choices=["ideal", "unit1"],
+        default=None,
+        help="with --simulate: physical front end of the simulated scope ('unit1' = the gain "
+        "errors and negative nonlinearity measured on one real unit; default: ideal)",
     )
     p.add_argument(
         "--export-dir",
@@ -277,6 +286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             print(f"edu09-mcp: --simulate: {exc}", file=sys.stderr)
             return EXIT_BUSY
+    if args.sim_unit is not None and args.simulate is None:
+        print("edu09-mcp: --sim-unit needs --simulate", file=sys.stderr)
+        return EXIT_BUSY
     if args.record is not None:
         from edu09.transport.replay import check_record_path
 
@@ -290,7 +302,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         for attempt in range(OPEN_ATTEMPTS):
             try:
                 if args.simulate is not None:
-                    scope = Scope.open(_recorded(SimTransport(spec, seed=None), args.record))
+                    sim = SimTransport(spec, seed=None)
+                    if args.sim_unit is not None:
+                        from edu09.transport.sim import PHYSICAL_UNITS
+
+                        sim.device.calibration = PHYSICAL_UNITS[args.sim_unit]
+                    scope = Scope.open(_recorded(sim, args.record))
                 else:
                     scope = Scope.open(
                         _recorded(None, args.record),

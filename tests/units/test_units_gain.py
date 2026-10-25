@@ -1,4 +1,4 @@
-"""Per-range gain calibration (``Calibration.range_gain``) and the reserved ``neg_nonlinearity``."""
+"""Per-range gain calibration (``Calibration.range_gain``); v2 fields: test_units_v2.py."""
 
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ def test_old_json_without_gain_loads(tmp_path: Path) -> None:
     p.write_text(json.dumps(old), encoding="utf-8")
     cal = storage.load_calibration(p)
     assert cal.range_gain == {}
-    assert cal.neg_nonlinearity is None
+    assert cal.neg_nonlinearity == {}
     assert cal.range_gain_for(0.5) == 1.0
     # save -> load keeps the (now explicit, empty) range_gain
     storage.save_calibration(cal.with_range_gain({"0.5": 0.974}), p)
@@ -117,40 +117,27 @@ def test_old_json_without_gain_loads(tmp_path: Path) -> None:
     assert storage.load_calibration(p).range_gain == {0.5: 0.974}
 
 
-def test_unknown_keys_still_rejected_but_neg_nonlinearity_reserved(tmp_path: Path) -> None:
+def test_unknown_keys_still_rejected_and_legacy_opaque_nl_rejected(tmp_path: Path) -> None:
     with pytest.raises(CalibrationError, match="unknown"):
         Calibration.from_dict({"bogus": 1})
-    future = {"version": 1, "points": {"0.5": [[-4.0, 1.06], [-3.0, 1.02]]}, "note": "x"}
-    cal = Calibration.from_dict({"range_gain": {"1": 0.996}, "neg_nonlinearity": future})
-    assert cal.neg_nonlinearity == future
-    d = cal.to_dict()
-    assert d["neg_nonlinearity"] == future
-    assert Calibration.from_dict(d) == cal
-    assert cal.calibration_id != Calibration(range_gain={1.0: 0.996}).calibration_id
-    # opaque data is not applied: volts identical to the same calibration without it
-    ch = ChannelSettings(VoltsPerDiv.V1)
-    no_nl = Calibration(range_gain={1.0: 0.996})
-    raw = np.arange(256)
-    assert np.array_equal(counts_to_volts(raw, ch, cal), counts_to_volts(raw, ch, no_nl))
-    # file round trip
-    p = tmp_path / "c.json"
-    storage.save_calibration(cal, p)
-    assert storage.load_calibration(p) == cal
+    legacy = {"version": 1, "points": {"0.5": [[-4.0, 1.06], [-3.0, 1.02]]}, "note": "x"}
+    with pytest.raises(CalibrationError, match="neg_nonlinearity"):
+        Calibration.from_dict({"range_gain": {"1": 0.996}, "neg_nonlinearity": legacy})
     # null is "absent"
-    assert Calibration.from_dict({"neg_nonlinearity": None}).neg_nonlinearity is None
+    assert Calibration.from_dict({"neg_nonlinearity": None}).neg_nonlinearity == {}
 
 
 @pytest.mark.parametrize("bad", [[1, 2], "x", 3, {"a": float("nan")}, {"a": object()}])
-def test_neg_nonlinearity_must_be_json_object(bad: Any) -> None:
+def test_neg_nonlinearity_must_be_knot_mapping(bad: Any) -> None:
     with pytest.raises(CalibrationError, match="neg_nonlinearity"):
         Calibration(neg_nonlinearity=bad)
 
 
 def test_neg_nonlinearity_is_copied() -> None:
-    src: dict[str, Any] = {"a": [1, 2]}
+    src: dict[str, Any] = {"0.5": [[4.0, 0.0], [5.0, 0.1]]}
     cal = Calibration(neg_nonlinearity=src)
-    src["a"].append(3)
-    assert cal.neg_nonlinearity == {"a": [1, 2]}
+    src["0.5"].append([6.0, 0.3])
+    assert cal.neg_nonlinearity == {0.5: ((4.0, 0.0), (5.0, 0.1))}
 
 
 def test_with_range_gain_merges() -> None:

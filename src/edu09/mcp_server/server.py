@@ -59,6 +59,7 @@ __all__ = [
     "mcp_url",
     "run_http",
     "run_stdio",
+    "shutdown_server",
     "start_http_in_thread",
     "transport_security",
 ]
@@ -84,7 +85,8 @@ _INSTRUCTIONS: Final = (
 class ServerOptions:
     """Server behaviour switches.
 
-    * ``allow_calibration``: register the ``calibrate`` tool (CLI ``--allow-calibration``).
+    * ``allow_calibration``: register the ``calibrate`` tool and the ``calibration_*`` wizard
+      tools (CLI ``--allow-calibration``).
     * ``export_dir``: where ``export_csv`` writes (default ``storage.default_export_dir()``).
     * ``owner_kind``: reported in ``get_status.owner`` when the scope holds no owner lock
       (simulator); "mcp" for ``edu09-mcp``, "gui" for the GUI.
@@ -150,9 +152,23 @@ def build_server(scope: Scope, opts: ServerOptions | None = None) -> FastMCP:
     return mcp
 
 
+def shutdown_server(mcp: FastMCP) -> None:
+    """Server shutdown hook: abort the calibration wizard session (if any). Idempotent."""
+    from edu09.mcp_server.cal_tools import shutdown_calibration
+
+    try:
+        shutdown_calibration(mcp)
+    except Exception:
+        log.exception("calibration shutdown hook failed")
+
+
 def run_stdio(scope: Scope, opts: ServerOptions | None = None) -> None:
     """Serve over stdio until the client closes stdin (blocks)."""
-    build_server(scope, opts).run("stdio")
+    mcp = build_server(scope, opts)
+    try:
+        mcp.run("stdio")
+    finally:
+        shutdown_server(mcp)
 
 
 # --------------------------------------------------------------------------------------------
@@ -292,8 +308,10 @@ class HttpServerHandle:
         host: str,
         port: int,
         errors: list[BaseException],
+        mcp: FastMCP | None = None,
     ) -> None:
         self._server = server
+        self._mcp = mcp
         self.thread = thread
         self._scope = scope
         self.host = host
@@ -317,6 +335,8 @@ class HttpServerHandle:
             first = not self._stopped
             self._stopped = True
         if first:
+            if self._mcp is not None:
+                shutdown_server(self._mcp)  # abort a calibration wizard session
             try:
                 self._scope.set_mcp_url(None)
             except Exception:
@@ -406,7 +426,7 @@ def start_http_in_thread(
     actual_port = port
     with contextlib.suppress(AttributeError, IndexError, OSError):  # uvicorn internals
         actual_port = int(server.servers[0].sockets[0].getsockname()[1])
-    handle = HttpServerHandle(server, thread, scope, host, actual_port, errors)
+    handle = HttpServerHandle(server, thread, scope, host, actual_port, errors, mcp)
     scope.set_mcp_url(handle.url)
     log.info("MCP server listening on %s", handle.url)
     return handle
