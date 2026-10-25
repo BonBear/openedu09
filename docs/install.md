@@ -58,7 +58,7 @@ On Wayland sessions Qt uses the `wayland` plugin when available (`libqt6-wayland
 which again needs `libxcb-cursor0`. Force a backend with `QT_QPA_PLATFORM=xcb` or
 `QT_QPA_PLATFORM=wayland`. `QT_DEBUG_PLUGINS=1` shows why a plugin fails to load.
 
-## Windows (untested)
+## Windows
 
 The EDU09 is a standard HID device, so **no driver is needed**; Windows binds `HidUsb`
 automatically. Install Python 3.12 from python.org, then in PowerShell:
@@ -70,7 +70,15 @@ pip install -e ".[gui]"
 edu09-gui
 ```
 
-Notes: this has not been tested on a Windows machine yet. Do not run the vendor EDU09.exe at the
+**Use Python 3.12 or 3.13, not 3.14+/3.15.** `hidapi` (and some other dependencies) has no
+pre-built wheels on PyPI for the newest Python yet, so pip tries to compile it from source, which
+needs the MSVC build tools and typically fails with `LNK1104` (cannot open file) because the build
+path exceeds Windows' 260-character limit. If you have several Pythons installed, create the venv
+explicitly with `py -3.12 -m venv .venv` as above. (If you must build from source: enable long
+paths — `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1` — and clone into a
+short path such as `C:\src\openedu09`.)
+
+Notes: simulator mode has been run on Windows; hardware on Windows is being tested. Do not run the vendor EDU09.exe at the
 same time (only one program can open the device). The owner lock lives under the user's local
 app data; if the device is reported busy, check for a stale `python.exe`. Please report problems
 with the output of `edu09-probe list`.
