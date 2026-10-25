@@ -1,5 +1,17 @@
 # Calibration wizard: spec (v1, 2026-10-25)
 
+> **Status: implemented** (historical design document). Code: `src/edu09/calwizard/`,
+> `src/edu09/gui/cal_wizard.py`, `src/edu09/mcp_server/cal_tools.py`; user documentation in
+> [docs/usage.md](../usage.md#calibration). Verified on hardware on 2026-10-25 (two runs, without and
+> with the RV1 trim, and the 5 V/div range with a 25 V source).
+>
+> **Superseded by the implementation:** the board trimmer RV1 is now known (the gain trim of the input
+> amplifier, "fine tuning of the input amplifier circuit" in the WSEDU09 manual), so `TrimmerConfig`
+> defaults are `placement="after_zero"`, `vdiv=0.5`, `reference="source"` (not `first` / 1 V/div) and
+> the first bullet of section 8 is obsolete. The trimmer readout measures deflection from the zero
+> step's measured ground map. `calibration_step` and `calibration_submit` payload details and the
+> exact CLI flags are in `mcp_server/cal_tools.py` and `edu09-calibrate --help`.
+
 Goal: anyone with an EDU09 and a multimeter can calibrate their own unit. The user describes the reference
 voltages they can produce. The wizard plans the steps, tells the user what to connect and asks for the multimeter
 reading, then measures. At the end it fits and saves a per-unit calibration (with a backup) and verifies it.
@@ -263,7 +275,7 @@ Every measurement is one `scope.run_exclusive(fn, abort_event=ev)` per setup: on
 - **Verify**: after `save` (the new calibration is installed). Measures through the installed calibration with *model* ground (no map). This is an independent check of the stored calibration and the position-to-DAC mapping.
 
 ### 3.4 Checks and quality codes
-Each `PointResult` carries a `QualityCode` (`ok, saturated, noisy, no_signal, polarity, reading_mismatch, out_of_window, drift, device_error`), a message and a hint.
+Each `PointResult` carries a `QualityCode` (`ok, saturated, noisy, no_signal, polarity, reading_mismatch, out_of_window, drift`), a message and a hint. (The planned `device_error` code was never used and was removed: device errors fail the setup with a `device error: ...` message.)
 
 | Check | Rule | Effect |
 |---|---|---|
@@ -308,8 +320,8 @@ Points are classified by the true deflection `d = v_ref/vdiv`, not by the planne
   - Validated with the 1.2 rules. If invalid, NL is dropped with a warning and the gains are kept.
   - Without `g-`, NL is not fitted (it can't be separated from gain).
 - Ranges without fitted values follow `uncalibrated`:
-  - `keep`: previous `g+`, `g-` and knots together.
-  - `typical`: `tables.TYPICAL_RANGE_GAIN` for `g+`, nothing for `g-` and NL.
+  - `keep`: previous `g+`, `g-` and knots together (none when the scope ran on the `Calibration.typical()` fallback, which has no gains).
+  - `typical`: `tables.TYPICAL_RANGE_GAIN` for `g+`, nothing for `g-` and NL (the only place that table is applied).
   - `unity`: remove.
   - If `g+` is fitted and `g-` isn't: the previous `g-`/knots are dropped (falls back to `g+`), because `g-` relative to an old `g+` is not trustworthy.
 - `calibration = base.with_gains(...)`, with `meta`, `source="measured"`. Hard limits are those of 1.2.
@@ -468,47 +480,26 @@ The sim already converts volts to counts with the device's *physical* `Calibrati
 - **CLI (B)**: `--plan-only` text and JSON; source grammar; `--simulate --sim-unit unit1 --yes` end to end to a tmp file; `--yes` without `--simulate` is a usage error.
 - **GUI (C, pytest-qt)**: drive the wizard on sim with prefilled readings to DONE; Cancel aborts; the zero page needs the checkbox; trimmer live updates stop on Done; the menu action opens the wizard; existing calibrate tests still pass.
 - **MCP (C)**: tools absent without the flag; full conversational flow on sim; payload sizes; validation; `finish(save=true)` without `confirm` refused; single session; idle-timeout abort.
-- **Manual hardware checklist (user, after merge)**:
-  - `--plan-only` with the user's real sources;
-  - a full standard run with the bench supply;
-  - compare the fitted values with `docs/data` (expect `g+` within 0.003);
-  - verify passes;
-  - trimmer exploration: run with `--trimmer --trimmer-reference open`, then again with `source`, turn the trimmer, and keep the session logs (they decide the trimmer defaults later).
+- **Manual hardware checklist**: done on 2026-10-25 (plan with real sources, full standard runs with a
+  bench supply, with and without the RV1 trim, 5 V/div with 25 V; the fitted values agree with
+  `docs/data`). The session logs decided the trimmer defaults (see the status banner).
 
 ---
 
-## 7. Task split (one wave, 3 coders in one shared checkout, strict file ownership)
+## 7. Task split
 
-**Interface-first rule (as in wave 2).** Within each task's first commit:
-- A publishes the `units` v2 signatures (fields, `deflection_to_volts`/`volts_to_deflection`, `with_gains`, `without_gain_correction`) and the `fit.py` dataclasses and signature.
-- B publishes `calwizard/__init__.py`, `model.py` (all dataclasses) and the `session.py` class with signatures.
+*The original split into three coders (A: data model, fit, simulator; B: planner, session, CLI; C: GUI,
+MCP, docs) with strict file ownership, the interface-first rule and the review checklist was an
+orchestration aid and is complete. Implemented in:*
+- A: `src/edu09/{units,storage}.py`, `src/edu09/protocol/tables.py`, `src/edu09/transport/{sim,replay}.py`,
+  `src/edu09/calwizard/{fit,simref}.py`;
+- B: `src/edu09/calwizard/{model,planner,session,cli}.py`, `src/edu09/device/calibration.py`;
+- C: `src/edu09/gui/cal_wizard.py`, `src/edu09/mcp_server/cal_tools.py`, docs.
 
-Placeholder bodies are allowed until implemented. Everything else codes against section 3.2 / 1.3.
-
-| Task | Model | Owns (only these files) | Deliverables |
-|---|---|---|---|
-| **A: data model, fit, sim** | pro | `src/edu09/units.py`, `src/edu09/protocol/tables.py`, `src/edu09/storage.py`, `src/edu09/transport/sim.py`, `src/edu09/transport/replay.py`, `src/edu09/calwizard/fit.py`, `src/edu09/calwizard/simref.py`, `docs/protocol.md` (5.2, 11.3), tests `tests/units/test_units_v2.py`, `tests/units/test_storage_v2.py`, `tests/calwizard/test_fit.py`, `tests/transport/test_sim_physics.py` | Sections 1, 3.5, 3.7 and 5 |
-| **B: planner, session, CLI** | pro | `src/edu09/calwizard/__init__.py`, `model.py`, `planner.py`, `session.py`, `cli.py`, `src/edu09/device/calibration.py` (`abort_event` pass-through, `replace`-based carry-over, `without_gain_correction`, `LevelReading.frame_spread`), `src/edu09/device/scope.py` (read-only `Scope.transport` property only), `pyproject.toml` (entry point), tests `tests/calwizard/test_planner.py`, `test_session.py`, `test_cli.py`, `test_e2e_unit1.py`, `tests/calwizard/conftest.py` | Sections 2, 3.1-3.4, 3.6 and 4.1 |
-| **C: GUI + MCP + docs** | inherit (sonnet ok for MCP part) | `src/edu09/gui/cal_wizard.py`, `src/edu09/gui/main_window.py`, `src/edu09/mcp_server/cal_tools.py`, `src/edu09/mcp_server/tools.py` (one register call), `src/edu09/mcp_server/server.py` (shutdown hook), `src/edu09/mcp_server/__main__.py` (optional `--sim-unit`), `docs/usage.md`, `docs/specs/architecture.md` (4.3, 5, 6), `README.md`, tests `tests/gui/test_cal_wizard.py`, `tests/mcp/test_cal_tools.py` (+ updates to existing gui tests touching the Calibrate action) | Sections 4.2 and 4.3, plus docs |
-
-Dependencies:
-- B's session e2e tests need A's units/fit/simref.
-- C's e2e tests need B's session.
-- Until those land, C tests against a small fake session (same API). A and B unit-test their pure parts in isolation.
-
-The integration order on merge is A, then B, then C. Then run the full suite plus ruff and mypy.
-
-**Review (reviewer, pro)**:
-- Invertibility and monotonicity proofs vs tests.
-- Abort and threading in the session and GUI (no measurement after abort; nothing saved; GUI never blocks).
-- MCP safety (flag gating, confirm, no fabricated readings path, payload caps).
-- Backward compatibility (pinned id, v1 bitwise equality, user file loads).
-- Secret audit of the diff.
-
-**Afterwards (orchestrator)**: the hardware session with the user (section 6 checklist), then update `tables.TYPICAL_*` and protocol 11.3 if the results disagree.
+---
 
 ## 8. Open questions / risks
-- **Trimmer purpose unknown.** Defaults (`placement=first`, `reference=source`, 1 V/div) are guesses. The logs from the first hardware run decide them. If it turns out to trim offset, prefer `reference=open`.
+- **Trimmer purpose (resolved).** RV1 trims the gain of the input amplifier (all ranges), so the implemented defaults are `placement=after_zero`, `reference=source`, 0.5 V/div; the original guesses were `first` and 1 V/div. *Original text: defaults were guesses; the logs from the first hardware run decide them; if it trimmed offset, prefer `reference=open`.*
 - **NL on other units** may start below 4 div or appear on other ranges. `knee_div` is a fit parameter, and `full` mode adds points. The 0.1, 1 and 2 V/div expansion was never measured beyond 5/3/1.5 div.
 - **Positive-side expansion** above 6 div has not been measured. It is not modelled; the format could later add a `pos_nonlinearity` key (v3).
 - **Fixed-source-only users** get fallback or missing ranges. The coverage report and divider hint mitigate this. `uncalibrated=typical` is opt-in because the typical values come from one unit.

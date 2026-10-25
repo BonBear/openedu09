@@ -1,6 +1,12 @@
 # Spectrum analyzer: spec
 
-Status: approved for implementation (2026-10-25). Two parallel tasks with disjoint files.
+> **Status: implemented** (historical design document; approved 2026-10-25). Code:
+> `src/edu09/analysis.py` (`spectrum`, `spectrum_average`, `spectrum_waveform`),
+> `src/edu09/gui/spectrum.py` and the MCP `spectrum` tool; user documentation in
+> [docs/usage.md](../usage.md#spectrum-analyzer). Verified on hardware with a 555 square wave
+> (levels within 1 % between realtime and ETS timebases).
+
+The work was split into two tasks (S1 analysis and MCP tool, S2 GUI view).
 
 ## Goal
 
@@ -20,9 +26,8 @@ FFT spectrum of the acquired 1024-sample frame, like the vendor software's spect
 
 ## Task S1: `src/edu09/analysis.py` (+ MCP tool + docs)
 
-Owner files: `src/edu09/analysis.py`, `src/edu09/mcp_server/tools.py` (new tool only),
-`tests/units/test_spectrum.py`, `tests/mcp/test_mcp_spectrum.py`, `docs/usage.md` (spectrum section),
-`README.md` (feature line), `CHANGELOG.md`.
+Implemented in `src/edu09/analysis.py` and `src/edu09/mcp_server/tools.py` (tests:
+`tests/units/test_spectrum.py`, `tests/mcp/test_mcp_spectrum.py`; docs: `docs/usage.md`).
 
 ```python
 WINDOWS: Final[tuple[str, ...]] = ("hann", "hamming", "blackman", "flattop", "rect")
@@ -105,8 +110,8 @@ include i[] if not evenly spaced), warnings}`. 4 significant digits, payload und
 
 ## Task S2: GUI spectrum view
 
-Owner files: `src/edu09/gui/spectrum.py` (new), `src/edu09/gui/main_window.py` (integration),
-`src/edu09/gui/controls.py` (only if a control is needed), `tests/gui/test_gui_spectrum.py`.
+Implemented in `src/edu09/gui/spectrum.py` with the integration in `src/edu09/gui/main_window.py`
+(tests: `tests/gui/test_gui_spectrum.py`).
 
 - View menu "Spectrum" (Ctrl+F) toggles a spectrum dock/panel under or beside the time plot (both
   visible at once; the time plot stays the main view). pyqtgraph PlotWidget: x = frequency (Hz/kHz
@@ -118,8 +123,6 @@ Owner files: `src/edu09/gui/spectrum.py` (new), `src/edu09/gui/main_window.py` (
 - Warnings line (aliasing, clipped, repetitive-signal note for ETS).
 - Computed from the frames the window already receives, on the GUI thread only if cheap (1024-point FFT
   is cheap). Throttle to the existing redraw rate. Averaging resets on any settings change.
-- Code against the S1 signatures above (they are final). Until S1 lands, a local fallback is not
-  needed; import `edu09.analysis.spectrum` at call time and test with the real function once present.
 
 ## Out of scope
 

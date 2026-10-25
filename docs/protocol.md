@@ -6,6 +6,10 @@ and the help files `EDU09/Info/*.chm`. On 2026-10-24 the orchestrator also obser
 real device plugged into the Linux host. Hardware captures (H1, 2026-10-24) are summarised in
 **section 11 (Hardware-verified)**, which overrides the static findings where they differ.
 
+**Status (2026-10-25):** the protocol has been verified on real hardware (firmware `1.01`) with the
+driver on Linux (hidraw) and Windows (hidapi). The *Observed* / *Inferred* tags in sections 0-10 record
+what the static analysis showed at the time; where section 11 answers a point, a note says so.
+
 Confidence tags:
 - **Observed**: read directly from code, data, DFM resources, help text or the real USB descriptors. The
   evidence is a virtual address (VA) in `EDU09.exe` unless another file is named.
@@ -77,10 +81,13 @@ There is no COM port selection logic for the scope.
 | Read a report | `ReadFile(hR, buf65, 65)`. The payload is `buf65[1..64]` (`USBRead` drops byte 0). | `read(fd, buf64, 64)`. There is no report-ID byte because the descriptor has no report IDs. | `hid_read(dev, buf64, 64)` or `hid_read_timeout` |
 | Find the device | SetupAPI with the HID GUID and `vid_10cf&pid_ed90` | Scan `/sys/class/hidraw/*/device/uevent` for `HID_ID=0003:000010CF:0000ED90` | `hid_open(0x10CF, 0xED90, NULL)` |
 
+Both mappings work on hardware (Linux hidraw and Windows hidapi, via `edu09.transport.hid_transport`).
 `ReadFile` in the original program is **blocking with no timeout**. A new driver should use a read timeout
 (for example 200 ms) and treat a timeout as "no report yet". Linux needs a udev rule to give the user access
 to the hidraw node, for example:
-`SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10cf", ATTRS{idProduct}=="ed90", MODE="0666"`.
+`SUBSYSTEM=="hidraw", ATTRS{idVendor}=="10cf", ATTRS{idProduct}=="ed90", MODE="0666"`
+(the rule shipped with this project, `packaging/linux/99-velleman-edu09.rules`, uses `MODE="0660"`,
+`GROUP="plugdev"` and `TAG+="uaccess"` instead).
 
 ---
 
@@ -114,6 +121,10 @@ Low-level writer `USBWrite(Self, buf, len)` at 0x5a82f0, **Observed**:
 | `0x0E` | 10 | SET CONFIGURATION (see 3.2) | `asetus_1` 0x5c6cb0, payload built by `Set500` 0x5c6894 | Observed |
 | `0x0F` | 1 | GET FIRMWARE VERSION. The reply holds 4 ASCII chars in bytes 0..3. | `Timer3Timer` 0x5c1e52 | Observed |
 | `0x14` | 1 | Sent on application close (inferred: release / power-down) | `FormClose` 0x5a8438 | Observed (meaning Inferred) |
+
+Hardware status (section 11): the meanings of `0x08` (stop), `0x09` (reset), `0x0A` (read-out), `0x0B`
+(arm), `0x0E` (configuration, no reply) and `0x0F` (version) are confirmed; `0x0D` is refuted (no live
+samples); `0x0C` and `0x14` have never been sent to a device.
 
 Quirk: if `Reset_500` is called with an unlisted (dl, cl) pair it re-sends whatever byte is already in the
 TX buffer at 0x187d838. A new driver should never do this.
@@ -200,7 +211,7 @@ used on 50/20/10 us/div with trigger forced on and no pre-trigger (`controls.htm
 |---|---|---|---|
 | 0 | `efb287` = 1 when trigger source = CH2 (`efb281`=0), 0 when CH1 (`efb281`=0x10). For Ext (`efb281`=1) the previous value is kept. | Trigger source | Observed; the Ch1/Ch2/Ext buttons are `Visible=False` in the EDU09 DFM, so in practice it is always CH1 (0) |
 | 1 | `efb288` = 1 when Trigger ON (`efb285`=0), 0 when OFF (`efb285`=0x40) | Trigger enable (off = free run) | Observed |
-| 2 | `efb289` = 0 when `efb282`=0x20 (SpeedButton5, default), 1 when `efb282`=0 (SpeedButton6) | Trigger edge. Inferred: 0 = rising "Up", 1 = falling "Dn". | Observed bit / Inferred polarity |
+| 2 | `efb289` = 0 when `efb282`=0x20 (SpeedButton5, default), 1 when `efb282`=0 (SpeedButton6) | Trigger edge: 0 = rising "Up", 1 = falling "Dn". | Observed bit; polarity HW-verified (section 11, finding 12) |
 | 3 | `efb473` | "Digital level grabber" mode (GrSpeedButton15, caption `10110010`) | Observed |
 | 4-5, 6-7 | Uninitialised Delphi locals in `Set500` (`[esp]`, `[esp+1]` from `push ecx`) | Garbage. **Send 0.** | Observed |
 
@@ -263,7 +274,8 @@ for i in 1..15: frame[64*i : 64*i+64] = read_report()
 3. **Channels**: the 4096 points go to the even bytes (CH1). The odd bytes (CH2) are set to **0**. The EDU09
    firmware path is **single-channel**; the CH2 code is a PCSU200 leftover. Observed (0x56ea74-0x56ea9c).
 4. The trigger point is at sample index **258** of the 1024 (help `dataacquisitiontootherappl.htm` for
-   DSOLink). Observed in the docs; not yet located in code.
+   DSOLink). Observed in the docs; not yet located in code. **HW: not 258**; the index depends on the
+   mode (255 / 248 / 253 / 253) and for ETS varies per session (section 11, findings 14 and 29).
 
 A new driver should expose the 1024 raw (de-interleaved) samples and leave interpolation to the UI.
 
@@ -291,7 +303,8 @@ unless a realtime timebase is given) and average the raw frame samples.
 ### 5.1 Time
 
 - `t[n] = (n - 258) / Fs` seconds relative to the trigger, with `Fs` from Table B. Fs is Observed; the
-  formula is Inferred.
+  formula is Inferred. HW (section 11, finding 14): the trigger index is 255 / 248 / 253 / 253 by
+  mode instead of 258 (the driver uses `units.trigger_index`, and detects the ETS edge per frame).
 - ETS rows give the effective, post-de-interleave rate.
 
 ### 5.2 Voltage
@@ -304,9 +317,9 @@ V = (sample - gnd_counts) * full_scale_mV / 256 / 1000        # volts
 counts per division = 32
 ```
 
-`full_scale_mV` = 8 x V/div (Table A). Polarity (whether a larger raw count means a more positive voltage) is
-**Unknown**. The GUI works in an inverted "screen" domain (`255 - raw`), and the exported GND is
-`255 - efb228` (0x5da1e8). Verify on hardware.
+`full_scale_mV` = 8 x V/div (Table A). Polarity: a larger raw count means a more positive voltage
+(**HW-verified**, section 11 finding 10; it was Unknown statically). The original's GUI works in an inverted
+"screen" domain (`255 - raw`), and the exported GND is `255 - efb228` (0x5da1e8).
 
 Hardware (section 11.3): the real gain is a few per cent higher than 32 counts/div and differs per range
 and per side of ground; the driver corrects it per range (calibration v2, `units.deflection_to_volts`). With
@@ -343,7 +356,8 @@ offset DAC mapping keeps the positive effective `32 / g+` counts per division.
   `gnd_screen = 2*ypos + 128` (slope 2 ADC counts per DAC step). **That is the original's demo mode only:
   real hardware measures k ~1.03, b ~-9.8, base_ofs 0x86** (HW-verified 2026-10-24, section 11 finding 24), so
   one division of position (32 counts) is ~31 DAC steps, not 16. The driver's `Calibration()` keeps the demo
-  model (simulator/test fixtures); hardware without a calibration file uses `Calibration.typical()`.
+  model (simulator/test fixtures); hardware without a calibration file uses `Calibration.typical()`
+  (these typical offsets, no gain correction; reported as uncalibrated).
 - **Settling** (HW-verified, section 11 finding 25): after a config that changed the offset byte the front end
   needs ~10-20 ms to settle; the driver waits `tables.OFFSET_DAC_SETTLE_S` = 20 ms before arming.
 
@@ -445,6 +459,10 @@ This can be reproduced in the new app for backward compatibility. It is not part
 
 ## 9. Open questions (need hardware or a capture)
 
+*Resolved by the hardware sessions (see section 11): 1, 2, 3, 4, 8 and 10 are answered, 5 and 6 partly
+(bit 3 of the flags byte, replies of `0x14` and `0x0C`), 7 is covered by how the driver behaves, and 9 is
+still open. The original questions are kept below with their resolution.*
+
 1. **Answered (section 11)**: nothing while idle; after `0x0B` the device streams a 64-zero-byte waiting
    report every ~33 ms and `64 C8 mm` on completion. (Was: does the device stream IN reports
    continuously while idle or armed, or only once per command?)
@@ -457,14 +475,22 @@ This can be reproduced in the new app for backward compatibility. It is not part
 4. **Answered (section 11)**: not 258; per mode 255 / 248 / 253 / 253 (+-1). (Was: is the trigger
    position index 258 for every timebase, and how does ETS change it?)
 5. **Partly answered (section 11)**: bit 2 set = falling edge. Bit 3 (digital mode) still unknown.
-6. Do `0x08` (stop) and `0x14` (exit) produce a reply? What does `0x0C` do?
-7. What is the device's behaviour if `0x0A` is sent before `64 C8`? Is it safe to re-send `0x0E` while armed?
+6. **Partly answered (section 11, findings 7 and 22)**: `0x08` while armed is followed by one more report
+   (0.8-8.2 ms later); idle: no reply. `0x14` and `0x0C` have never been sent (still unknown).
+7. `0x0A` before `64 C8` has never been tried (the driver only sends it after a valid status). The driver
+   does re-send `0x0E` (then `0x09`, `0x0B`) while armed, for settings changes during a continuous run and for the
+   AUTO fallback, which works on hardware.
 8. **Answered (section 11)**: `"1.01"` + CR, then garbage. (Was: are bytes 0..3 ASCII digits?)
-9. Effect of the CH2 bytes (4, 6) on single-channel EDU09 hardware: ignored, or used?
+9. Effect of the CH2 bytes (4, 6) on single-channel EDU09 hardware: ignored, or used? (Still open; the
+   driver sends neutral constants.)
 10. **Answered for 200 us, 50 us, 20 us, 10 us/div (section 11)**: Table B rates are right (10 us/div =
     1.5625 MHz, like 20 us). Other timebases follow the same 31.25 samples/div rule but are untested.
 
 ## 10. Suggested capture plan
+
+*Historical plan from before hardware access. The direct probing of step 3 was carried out as H1/H2; the
+results are in section 11 (fixtures in `tests/fixtures/h1/`). No captures of the vendor software are part
+of this repository.*
 
 1. **Windows + Wireshark/USBPcap** (best). Install USBPcap, capture the root hub the EDU09 is on, and run
    EDU09.exe. Filter with `usb.idVendor == 0x10cf || usb.device_address == N`, then look at `usb.capdata` on
@@ -646,7 +672,8 @@ averaged; the offset/ground calibration of 11.2 checked accurate within ~1 count
     Equivalently the true sensitivity is `32 / g` counts/div (e.g. 0.5 V/div ~32.85). The driver stores these
     per unit in `Calibration.range_gain` (calibration.json key `range_gain`, missing = 1.0) and applies them in
     every counts <-> volts path, the trigger byte and the position -> offset DAC mapping. The table is
-    `tables.TYPICAL_RANGE_GAIN`, used by `Calibration.typical()` (measured on one unit only). Measure your
+    `tables.TYPICAL_RANGE_GAIN` (measured on one unit only; not applied by default: `Calibration.typical()`
+    has no gain correction, the wizard uses the table only with `--uncalibrated typical`). Measure your
     own with `edu09-gain` / `edu09.device.calibration.gain_from_reference` (docs/usage.md).
 28. **Negative side** (sweep data: `docs/data/edu09_gain_sweep_unit1.json`): below ground the sensitivity is
     **0.5-1 % higher** than above ground (unit 1, 0.5 V/div: 33.0 counts/div vs 32.85), independent of the

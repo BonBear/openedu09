@@ -16,7 +16,19 @@ openedu09 is a local driver, GUI and MCP server for a USB device.
   calls are limited to 330 s and upstream JSON responses to 8 MiB. `--no-bridge` disables
   forwarding.
 - The stdio MCP server inherits the privileges of the launching client.
-- Calibration and unknown opcodes are gated behind explicit flags and confirmations.
+- Calibration and unknown opcodes are gated behind explicit flags and confirmations: the MCP
+  `calibrate` and `calibration_*` tools exist only with `--allow-calibration`, saving needs
+  `confirm=true`, the zero step needs `input_disconnected=true`, and reference readings must be typed
+  by the human (the tools forbid agents to invent them). `edu09-probe` sends nothing beyond read-only
+  commands without `--allow-acquire`, and unknown opcodes need `--allow-unknown` plus a typed
+  confirmation.
+- `export_csv` only writes plain `*.csv` file names inside the server's export directory (no paths,
+  no overwriting unless asked).
+- Only one process can own the scope (file lock), so another local program cannot interleave
+  commands with a running GUI or MCP server. The Linux udev rule gives the device to the logged-in
+  desktop user and the `plugdev` group only (mode `0660`).
+- Debug recordings (`--record`) contain the USB reports exchanged with the scope (no credentials);
+  check a file before attaching it to a public issue.
 
 ## Reporting a vulnerability
 

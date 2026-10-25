@@ -1,12 +1,41 @@
 # EDU09 replacement software: architecture spec
 
-Status: draft v1 (2026-10-24, architect). Inputs: `docs/protocol.md` (static RE; only the `0x0F` version
-query is hardware-verified), `.agents/memory/project_state.md`.
+> **Status: historical design document; implementation complete.** Written on 2026-10-24 by the
+> architect before the hardware probing sessions. All tasks (T0-T13, H1) are done and the software is verified on
+> real hardware (Linux and Windows, firmware 1.01). **Current behaviour is documented in
+> [docs/usage.md](../usage.md) and [docs/protocol.md](../protocol.md) section 11** (hardware-verified;
+> it wins wherever the two disagree). Sections 2.1-4 and 6 were updated as hardware findings arrived;
+> section 8 (task and wave plan) and parts of section 9 describe the planning state.
+>
+> **Superseded by the current code** (the text below still shows the original plan in these places):
+> - *Verification:* the "every protocol byte layout except `0x0F` is unverified" statement is obsolete;
+>   see protocol.md section 11. `0x0D` is **not** a live mode (it only starts a status stream) and the
+>   driver never sends it; status polling is passive (`tables.STATUS_POLL = "passive"`); the trigger
+>   index is per mode (255/248/253/253) and detected per frame for triggered ETS frames, not 258.
+> - *Calibration defaults:* `Calibration()` keeps the idealised `GndFit(k=2, b=-128)` for the
+>   simulator and tests; hardware without a calibration file uses `Calibration.typical()`
+>   (`base_ofs` 0x86, `k` ~1.03, `b` ~-9.8, no gain correction) and reports itself as uncalibrated
+>   (`ScopeStatus.calibrated`, MCP `get_status`, GUI status bar), see 4.3.
+> - *Package layout (section 2):* added `src/edu09/calwizard/` (wizard engine and `edu09-calibrate`),
+>   `gui/{cal_wizard,spectrum,zoomview}.py`, `mcp_server/{cal_tools,netaddr}.py`, and
+>   `src/edu09/probe.py`. Console scripts also include `edu09-calibrate`
+>   and `edu09-gain` (`edu09.device.calibration:main`).
+> - *MCP surface (section 6):* the `spectrum` tool, `export_csv(overwrite)`, `measure(despike)`,
+>   `configure(trigger_auto_timeout_s)` and the `calibration_*` wizard tools were added later; the
+>   exact payloads are in docs/usage.md and `mcp_server/tools.py`.
+> - *Probe:* the `tools/probe.py` shim was removed; use `edu09-probe` or `python -m edu09.probe`.
+>   There is no `probe.py capture` subcommand; captures come from `acquire`, `listen`, ...
+>   and from `--record` on `edu09-gui` / `edu09-mcp`.
+> - *ETS outliers (risk H1-b):* resolved as opt-in `analysis.despike` (GUI View > Despike, MCP
+>   `despike` parameter), not applied by default.
+> - Related specs: [calibration_wizard.md](calibration_wizard.md), [spectrum.md](spectrum.md).
+
+Input at the time: `docs/protocol.md` (static RE; only the `0x0F` version query was hardware-verified).
 
 Goals: a Python driver library, an MCP server for AI agents, and a desktop GUI for the Velleman EDU09
-(USB HID 0x10CF:0xED90). Python 3.12 on Windows and Linux. **Every protocol byte layout except `0x0F` is
-unverified**, so the design keeps protocol knowledge in one table module plus pure codecs, and makes it
-cheap to record real traffic and replay it in tests.
+(USB HID 0x10CF:0xED90). Python 3.12 on Windows and Linux. **Every protocol byte layout except `0x0F` was
+unverified when this was written**, so the design keeps protocol knowledge in one table module plus pure
+codecs, and makes it cheap to record real traffic and replay it in tests.
 
 ---
 
@@ -23,8 +52,8 @@ cheap to record real traffic and replay it in tests.
 | Dev | pytest, pytest-qt, ruff, mypy | |
 
 `pyproject.toml` (hatchling, src layout). Extras: `gui`, `dev`. Console scripts: `edu09-mcp`
-(`edu09.mcp_server.__main__:main`), `edu09-gui` (`edu09.gui.app:main`), `edu09-probe` (`edu09.probe:main`; `tools/probe.py` is a thin shim,
-also runnable as `python tools/probe.py`). Works with `uv sync --all-extras` and with `pip install -e .[gui,dev]`.
+(`edu09.mcp_server.__main__:main`), `edu09-gui` (`edu09.gui.app:main`), `edu09-probe` (`edu09.probe:main`,
+also runnable as `python -m edu09.probe`; the original `tools/probe.py` shim was removed). Works with `uv sync --all-extras` and with `pip install -e .[gui,dev]`.
 Linux needs `packaging/linux/99-velleman-edu09.rules` installed (already present). Windows needs no driver
 because the device is a standard HID.
 
@@ -40,7 +69,7 @@ src/edu09/
   model.py               # enums, ChannelSettings/TriggerSettings/Settings, Waveform (pure, no numpy I/O)
   units.py               # Calibration dataclass, counts<->volts, trigger level byte, offset DAC, time axis
   analysis.py            # measurements + decimation (pure numpy)
-  storage.py             # calibration JSON load/save (atomic), EDU09.ini import, CSV export, WaveformStore
+  storage.py             # calibration JSON load/save (atomic), CSV export, WaveformStore (EDU09.ini import: removed)
   protocol/
     tables.py            # ALL magic numbers: opcodes, gain codes, timebase table, flag bits, status
                          #   marker, frame size, trigger index, ADC polarity, opcode safety classes
@@ -70,7 +99,7 @@ src/edu09/
     main_window.py       # layout, menus, status bar
     controls.py          # V/div, coupling, timebase, trigger, position, run/stop/single widgets
     plot.py              # pyqtgraph plot widget, cursors, measurements panel
-tools/probe.py           # hardware probe + capture CLI (read-only by default)
+tools/probe.py           # hardware probe + capture CLI (read-only by default; now src/edu09/probe.py)
 tests/
   fixtures/              # *.jsonl captures + hand-written byte fixtures
   protocol/ transport/ device/ mcp/ gui/ hw/   # one directory per area (file ownership, sec. 7)
@@ -272,7 +301,7 @@ No x4 upsampling or smoothing happens in the driver; that is a display concern.
 ### 4.3 Units and calibration
 
 `Calibration` (frozen): `base_ofs=0x80`, `range_corr: dict[float,int]`, `gnd_fit=(k=2.0, b=-128.0)` (fit in the "ad = 255 - raw" domain against the absolute DAC byte, per protocol.md 5.3; 0 V -> raw 127, trigger byte 127),
-`counts_per_div=32`, `adc_inverted=tables.ADC_INVERTED`, `source: "default"|"typical"|"file"|"ini-import"|"measured"`,
+`counts_per_div=32`, `adc_inverted=tables.ADC_INVERTED`, `source: "default"|"typical"|"file"|"measured"` (the planned `"ini-import"` and its vendor-INI importer were removed, never exposed; `from_dict` loads it as `"file"`),
 `range_gain: dict[float,float]` (per-range gain correction `g = V_true / V_read`, `0.8 < g < 1.25`, missing = 1.0;
 like `range_corr` excluded from `hash()`, JSON keys are strings; since the calibration wizard it is the
 **positive-side** gain), `range_gain_neg` (negative-side gain, missing = `range_gain`), `neg_nonlinearity`
@@ -285,7 +314,7 @@ counts <-> volts path (`counts_to_volts` multiplies by g, `volts_to_counts`/`vol
 and by the position -> offset DAC conversion, so the ADC window stays centred on the screen. `level_range_v()`
 (model, calibration-free) stays the 8-division screen window; with g < 1 the ADC span is up to ~2.6 % smaller
 than the screen (it saturates just inside the edges), and an out-of-ADC trigger level is clamped to 0/255. HW-measured gains
-(one unit, 2026-10-25) are `tables.TYPICAL_RANGE_GAIN`, included in `Calibration.typical()`. The offset
+(one unit, 2026-10-25) are `tables.TYPICAL_RANGE_GAIN` (not applied by default; `Calibration.typical()` has no gains). The offset
 calibration (`measure_calibration`) carries `range_gain`/`neg_nonlinearity` over unchanged;
 `calibration.gain_from_reference` (CLI `edu09-gain`) measures one range against a DC reference. The
 **calibration wizard** (`edu09.calwizard`, spec `docs/specs/calibration_wizard.md`) plans and runs a full
@@ -298,7 +327,8 @@ fixtures use it, so sim/replay scopes keep it. Real units have a DAC slope of on
 (HW-measured 2026-10-24: `base_ofs=0x86`, `range_corr={1 V: -1, 0.1 V: -1}`, `k~1.03`, `b~-9.8`), so with
 `Calibration()` positions on hardware would be ~2x off: `Scope.open` on a hardware (`hid`) transport without a
 usable calibration file uses `Calibration.typical()` (those values, `source="typical"`, from
-`tables.TYPICAL_*`); a per-unit `Scope.calibrate` result (file) always wins.
+`tables.TYPICAL_*`, no gain correction; logged and reported as uncalibrated); a per-unit calibration
+file always wins.
 Offset settling (HW-verified): after a `0x0E` that changed the offset byte (or the CH1 gain/coupling byte, or
 when the device config is unknown) the worker waits `tables.OFFSET_DAC_SETTLE_S` (20 ms, worker clock, by
 reading and discarding IN reports) before `0x0B`; unchanged configs (continuous running, AUTO free-run
@@ -319,8 +349,8 @@ divisions to DAC steps through `k`), and the trigger byte from `level_v` via `vo
   DAC bytes). It is still opt-in because it overwrites stored calibration and needs a disconnected input:
   `Scope.calibrate(confirm=True, input_disconnected=True)` (both required, else `UnsafeOperation`). It
   writes `calibration.json` atomically (tmp + `os.replace`) after backing up the previous file as
-  `calibration.<timestamp>.bak.json`. It never touches the vendor `EDU09.ini`, which can only be imported
-  read-only.
+  `calibration.<timestamp>.bak.json`. It never touches the vendor `EDU09.ini` (the planned read-only
+  import was removed).
 * MCP: the `calibrate` tool and the `calibration_*` wizard tools are **not registered** unless the server
   starts with `--allow-calibration`; even then `calibrate` and `calibration_finish(save=true)` require
   `confirm=true`, the zero step requires `input_disconnected=true`, and reference readings must be typed by
@@ -331,7 +361,7 @@ divisions to DAC steps through `k`), and the trigger byte from `level_v` via `vo
   GUI thread and keeps the "input disconnected" confirmation for the zero step. Reversing a source is only
   offered for floating sources (warning in every plan with a reversible source). `export_csv` only writes inside the export dir (default
   `user_data_dir/edu09/exports`; `..`/absolute paths are rejected).
-* `tools/probe.py` is **read-only by default** (sec. 7.1).
+* `edu09-probe` (planned as `tools/probe.py`) is **read-only by default** (sec. 7.1).
 
 ---
 
@@ -348,11 +378,12 @@ target under 32 KB.
 |---|---|---|
 | `get_status` | — | `{connected, firmware, owner:{kind,pid}, state:"idle"\|"running"\|"armed"\|"disconnected", settings, last_waveform_id, calibration_source, simulated}` |
 | `get_capabilities` | — | `{volts_per_div:[...], timebases_s_per_div:[...], couplings, trigger_modes, trigger_edges, position_div_range, samples_per_frame:1024, divisions_per_frame:32.8, ets_timebases:[...], measurements:[...], limits:{max_points:2048}}` |
-| `configure` | all optional: `volts_per_div: float, coupling: str, timebase: str\|float` (e.g. `"2ms"` or `0.002`), `trigger_mode, trigger_edge, trigger_level_v: float, position_div: float` | `{settings, warnings:[str]}`; partial update, validated atomically (all or nothing) |
-| `acquire` | `timeout_s=2.0` (0.1–30), `max_points=200` (16–2048), `trigger_mode: str\|None` | `{waveform_id, timestamp, triggered, clipped, settings, sample_rate_hz, duration_s, stats:{min,max,mean,vpp,vrms,frequency_hz\|null}, points:{t0_s, dt_s, decimation:"minmax", v:[...]}, warnings}` |
-| `get_waveform` | `waveform_id="latest"`, `start=0`, `stop=1024`, `max_points=1024`, `decimation="minmax"\|"stride"`, `include_raw=false` | `{waveform_id, t0_s, dt_s, v:[...], raw:[...]?}`; index range in samples |
-| `measure` | `waveform_id="latest"`, `measurements: list[str] \| None` (all if None) from `vpp,vmax,vmin,mean,vrms,ac_rms,frequency,period,duty,rise_time,fall_time,pos_width,neg_width` | `{waveform_id, results:{name:{value,unit,valid,note?}}}` |
-| `export_csv` | `waveform_id="latest"`, `filename: str\|None` | `{path, rows, columns:["t_s","volts","raw"]}` (header carries settings as `#` comments) |
+| `configure` | all optional: `volts_per_div: float, coupling: str, timebase: str\|float` (e.g. `"2ms"` or `0.002`), `trigger_mode, trigger_edge, trigger_level_v: float, position_div: float, trigger_auto_timeout_s: float` | `{settings, warnings:[str]}`; partial update, validated atomically (all or nothing) |
+| `acquire` | `timeout_s=2.0` (0.1–30), `max_points=200` (16–2048), `trigger_mode: str\|None` | `{waveform_id, timestamp, triggered, clipped, settings, sample_rate_hz, duration_s, stats:{min,max,mean,vpp,vrms,frequency_hz\|null}, points:{t0_s, sample_dt_s, decimation, v:[...], and dt_s (evenly spaced) or i:[...] sample offsets (minmax)}, warnings}` |
+| `get_waveform` | `waveform_id="latest"`, `start=0`, `stop=1024`, `max_points=1024`, `decimation="minmax"\|"stride"`, `include_raw=false` | `{waveform_id, <points as in acquire>, raw:[...]?}`; index range in samples |
+| `measure` | `waveform_id="latest"`, `measurements: list[str] \| None` (all if None) from `vpp,vmax,vmin,mean,vrms,ac_rms,frequency,period,duty,rise_time,fall_time,pos_width,neg_width`, `despike=false` | `{waveform_id, results:{name:{value,unit,valid,note?}}, despiked}` |
+| `spectrum` | `waveform_id="latest"`, `window="hann"`, `max_points=512`, `peaks=8`, `db_floor=-80`, `despike=false` (added with the spectrum analyzer, [spectrum.md](spectrum.md)) | `{fs_hz, resolution_hz, n, dc_v, fundamental, thd_pct, peaks, points, warnings, ...}` |
+| `export_csv` | `waveform_id="latest"`, `filename: str\|None`, `overwrite=false` | `{path, rows, columns:["t_s","volts","raw"]}` (header carries settings as `#` comments) |
 | `set_running` | `running: bool` | `{state}`: continuous acquisition (feeds GUI and `latest`) |
 | `auto_set` | `timeout_s=5.0` | `{settings, rationale:[str], waveform_id}` |
 | `list_waveforms` | — | `[{waveform_id, timestamp, timebase, volts_per_div}]` (store keeps the last 32) |
@@ -407,6 +438,9 @@ consume directly. Each verified finding adds a fixture and a `tables.py` edit, a
 
 ### 7.1 `tools/probe.py`
 
+> Now `src/edu09/probe.py`; the `tools/probe.py` shim was removed. Use `edu09-probe` or
+> `python -m edu09.probe`.
+
 Subcommands: `list` (enumerate HID devices), `version` (0x0F), `listen --seconds N` (read only), `config
 HEX...` / `acquire --timebase 2ms --vdiv 1 --count N`, `send HEX`, `replay FILE`. All of them log every
 OUT/IN report as JSONL `{"t": mono_s, "dir": "out"|"in", "hex": "...", "note": "..."}` to
@@ -420,32 +454,29 @@ typed confirmation. The default is read-only. The probe uses `protocol` and `tra
 
 ## 8. Milestones and tasks (file ownership = no two parallel tasks share files)
 
-| ID | Task | Owns files | Depends on | Tier |
-|---|---|---|---|---|
-| **T0** | Scaffold: pyproject (deps, extras, scripts, markers, ruff/mypy cfg), `src/edu09/__init__.py`, `errors.py`, `tests/conftest.py`, `.github/workflows/ci.yml`, `.gitignore` additions (`captures/`) | listed | — | flash |
-| **T1** | Protocol: `protocol/{tables,commands,reports,ets}.py` + `tests/protocol/` | `protocol/*`, `tests/protocol/*` | T0 | inherit |
-| **T2** | Model + units: `model.py`, `units.py` + `tests/units/test_model.py,test_units.py` | listed | T0 (uses the `tables` interface from 2.1; stub values agreed in this spec) | inherit |
-| **T3** | Transport: `transport/{base,hid_transport,discovery,replay}.py` + `tests/transport/` | listed | T0 | flash |
-| **T4** | Probe CLI: `tools/probe.py` (+ `tests/tools/test_probe.py` using ReplayTransport/mocked hid) | listed | T1, T3 | flash |
-| **T5** | Analysis: `analysis.py` (measurements, decimate) + `tests/units/test_analysis.py` | listed | T0 | inherit |
-| **T6** | Simulator: `transport/sim.py` + `tests/device/test_sim.py` | listed | T1, T2, T3 | inherit |
-| **T7** | Device core: `device/{worker,scope,lock}.py` + `tests/device/test_worker.py,test_scope.py,test_lock.py` | listed | T1, T2, T3, T6 | **pro** (concurrency) |
-| **T8** | Storage: `storage.py` (calibration JSON, INI import, CSV, WaveformStore) + `tests/units/test_storage.py` | listed | T2 | flash |
-| **T9** | Calibration + autoset: `device/{calibration,autoset}.py` + tests | listed | T5, T7, T8 | inherit |
-| **T10** | MCP server: `mcp_server/{tools,server,__main__}.py` + `tests/mcp/` | listed | T5, T7, T8 (T9 for `auto_set`/`calibrate`; register those last) | inherit |
-| **T11** | GUI: `gui/*` + `tests/gui/` | listed | T5, T7 (T8 for export, T10 for the in-process HTTP toggle) | inherit |
-| **T12** | Bridge + owner discovery: `mcp_server/bridge.py` + `tests/mcp/test_bridge.py` | listed | T7 (lock), T10 | inherit |
-| **H1** | Hardware probing session (human + probe): answer Q1–Q10, commit fixtures, fix `tables.py` | `tests/fixtures/*`, `tables.py` edits via a T1 follow-up | T4 | — |
-| **T13** | Hardware tests `tests/hw/` + docs (README, install, udev, Windows notes) | listed | T7, H1 | flash |
+*The original task and wave plan (T0-T13, H1; six waves with strict file ownership and model tiers per
+task) was an orchestration aid and is complete; the task ids survive in code comments and in section 9.
+Where each task ended up:*
 
-Parallel waves: **W1** T0 -> **W2** T1, T2, T3, T5 (4 coders) -> **W3** T4, T6, T8 -> **W4** T7 (and H1
-as soon as T4 lands) -> **W5** T9, T10, T11 -> **W6** T12, T13. Map to project milestones: M3 = T0–T8,
-M4 = T9, T10, T12, M5 = T11, M6 = H1, T13.
+| ID | Task | Implemented in |
+|---|---|---|
+| T0 | Scaffold (pyproject, errors, test config, CI) | `pyproject.toml`, `src/edu09/errors.py`, `tests/conftest.py`, `.github/workflows/ci.yml` |
+| T1 | Protocol | `src/edu09/protocol/`, `tests/protocol/` |
+| T2 | Model and units | `src/edu09/model.py`, `src/edu09/units.py` |
+| T3 | Transport | `src/edu09/transport/{base,hid_transport,discovery,replay}.py` |
+| T4 | Probe CLI | `src/edu09/probe.py` |
+| T5 | Analysis | `src/edu09/analysis.py` |
+| T6 | Simulator | `src/edu09/transport/sim.py` |
+| T7 | Device core | `src/edu09/device/{worker,scope,lock}.py` |
+| T8 | Storage | `src/edu09/storage.py` |
+| T9 | Calibration and auto-set | `src/edu09/device/{calibration,autoset}.py`, later `src/edu09/calwizard/` |
+| T10 | MCP server | `src/edu09/mcp_server/{tools,server,__main__}.py` |
+| T11 | GUI | `src/edu09/gui/` |
+| T12 | Bridge and owner discovery | `src/edu09/mcp_server/bridge.py` |
+| H1 | Hardware probing sessions (answered Q1-Q10) | `tests/fixtures/h1/`, `docs/protocol.md` section 11 |
+| T13 | Hardware tests and docs | `tests/hw/`, `README.md`, `docs/install.md`, `docs/usage.md` |
 
-Coordination rule: if a task needs to change a file owned by another task's area (for example `tables.py`
-during T7), it files the change request with the orchestrator instead of editing directly.
-
----
+Project milestones: M3 = T0-T8, M4 = T9, T10, T12, M5 = T11, M6 = H1, T13 (all done).
 
 ## 9. Risks and open protocol questions
 
