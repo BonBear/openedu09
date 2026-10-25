@@ -56,7 +56,7 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[gui]'          # or: uv pip install -e '.[gui]'
 ```
 
-On Windows use `.venv\Scripts\activate` instead of `. .venv/bin/activate` (Windows is untested,
+On Windows use `py -3.12 -m venv .venv` and `.venv\Scripts\activate` instead (Python 3.12/3.13;
 see [docs/install.md](docs/install.md)).
 
 Linux needs a udev rule once (see [docs/install.md](docs/install.md)):
@@ -171,10 +171,12 @@ Alpha (0.1.0, unreleased). Known limitations:
 - Vertical gain: uncorrected units read 0.4-2.6 % high, and large **negative** deflections (more
   than ~4 div below ground at 0.2/0.5 V/div) up to ~6 % too large; the calibration wizard measures
   and corrects both per unit (positive/negative gain and a piecewise negative correction). The
-  wizard is new and not yet verified on hardware; the purpose of the board trimmer RV1 comes from
-  the vendor manual.
-- **Windows is untested** (no test machine); CI only runs the simulator-based tests.
-- Intermittent readout timeouts at startup are known and under investigation.
+  wizard has been run on hardware (with and without trimming RV1; verify within ~0.6 %); the
+  purpose of the board trimmer RV1 comes from the vendor manual.
+- Windows 11 has been tested with hardware (Python 3.12): all hardware tests, GUI, MCP bridge and
+  owner lock pass. Use Python 3.12/3.13 (no `hidapi` wheels for 3.15 yet). macOS is untested.
+- A one-off readout timeout at GUI startup was seen once early on and has not been reproduced
+  since; run with `--record FILE` and report it if it happens.
 - Single channel (CH1) only; other firmware versions untested.
 
 ## Verified hardware facts

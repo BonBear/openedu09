@@ -78,7 +78,9 @@ explicitly with `py -3.12 -m venv .venv` as above. (If you must build from sourc
 paths — `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1` — and clone into a
 short path such as `C:\src\openedu09`.)
 
-Notes: simulator mode has been run on Windows; hardware on Windows is being tested. Do not run the vendor EDU09.exe at the
+Notes: tested on Windows with hardware (all hardware tests, GUI, MCP bridge, owner lock). Windows
+buffers up to 64 input reports, so several status reports may precede a read-out; this is
+handled. Do not run the vendor EDU09.exe at the
 same time (only one program can open the device). The owner lock lives under the user's local
 app data; if the device is reported busy, check for a stale `python.exe`. Please report problems
 with the output of `edu09-probe list`.

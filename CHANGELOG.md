@@ -33,4 +33,5 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
   aliasing on realtime timebases, clipped and ETS frames) and the MCP `spectrum` tool.
 
 ### Known limitations
-- Vertical gain not calibrated; Windows untested; startup readout timeouts under investigation.
+- Windows verified with hardware (Python 3.12/3.13 only); macOS untested.
+- Vertical gain is calibrated per unit by the wizard; 5 V/div positive gain/nonlinearity needs >15 V.
