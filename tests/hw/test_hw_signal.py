@@ -30,6 +30,35 @@ TIMEBASES = timebases_for(signal_from_env())
 EDGE_CHECK_MIN_SAMPLES_PER_PERIOD = 11
 
 
+_SIGNAL_SEEN: dict[str, float] = {}
+
+
+@pytest.fixture(autouse=True)
+def _signal_present(scope: Scope, signal: SignalSpec) -> None:
+    """Fail every signal test with one clear message when CH1 shows no swing (source unpowered,
+    probe not connected, x10 probe...), instead of 17 trigger timeouts."""
+    if "ok" not in _SIGNAL_SEEN:
+        vd, pos = fit_signal(signal)
+        scope.configure(
+            volts_per_div=vd,
+            position_div=pos,
+            coupling="dc",
+            timebase="200us",
+            trigger_mode="none",
+        )
+        wf = scope.acquire(timeout_s=3.0)
+        vpp = float(wf.volts.max() - wf.volts.min())
+        _SIGNAL_SEEN["ok"] = float(vpp >= 0.5 * signal.vpp)
+        _SIGNAL_SEEN["vpp"] = vpp
+    if not _SIGNAL_SEEN["ok"]:
+        pytest.fail(
+            f"no signal on CH1: measured {_SIGNAL_SEEN['vpp']:.2f} Vpp, expected about "
+            f"{signal.vpp:.2f} Vpp from EDU09_HW_SIGNAL - is the source powered and the probe "
+            "connected (x1)?",
+            pytrace=False,
+        )
+
+
 def _setup(scope: Scope, sig: SignalSpec, tb: Timebase, edge: str, mode: str = "normal") -> None:
     vd, pos = fit_signal(sig)
     scope.configure(
