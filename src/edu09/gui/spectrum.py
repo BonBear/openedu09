@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from edu09 import analysis
 from edu09.gui.fmt import format_si
 from edu09.gui.plot import _theme
+from edu09.gui.zoomview import WheelViewBox
 from edu09.model import Waveform
 
 if TYPE_CHECKING:
@@ -159,7 +160,8 @@ class SpectrumPanel(QWidget):
         bar.addStretch(1)
 
         # plot
-        self.widget: Any = pg.PlotWidget(background=theme["background"])
+        self.view_box = WheelViewBox()
+        self.widget: Any = pg.PlotWidget(background=theme["background"], viewBox=self.view_box)
         self.item: Any = self.widget.getPlotItem()
         self.item.showGrid(x=True, y=True, alpha=0.3)
         self.item.setMenuEnabled(False)
@@ -198,6 +200,9 @@ class SpectrumPanel(QWidget):
             self.item.addItem(line, ignoreBounds=True)
         self.item.setYRange(*DEFAULT_DB_RANGE, padding=0)
         self.widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        # wheel = frequency zoom, Ctrl+wheel = dB zoom (leaves Auto Y); double-click = reset view
+        self.view_box.userYChanged.connect(self._on_user_y_zoom)
+        self.view_box.doubleClicked.connect(self.reset_view)
 
         # readouts
         self.readout_label = QLabel("—")
@@ -288,6 +293,18 @@ class SpectrumPanel(QWidget):
         self.cursor_label.setText("")
         for line in (self.vline, self.hline):
             line.setVisible(False)
+        self._fit_pending = True
+        self._redraw()
+
+    def _on_user_y_zoom(self) -> None:
+        if self.autoscale_check.isChecked():
+            self.autoscale_check.blockSignals(True)  # keep the zoomed range (no default reset)
+            self.autoscale_check.setChecked(False)
+            self.autoscale_check.blockSignals(False)
+
+    def reset_view(self) -> None:
+        """Fit the frequency axis to the data and restore the Y axis (auto or default dB range)."""
+        self._set_autoscale(self.autoscale_check.isChecked())
         self._fit_pending = True
         self._redraw()
 

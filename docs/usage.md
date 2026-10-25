@@ -29,7 +29,11 @@ misdetects the library.
 
 - **Plot** (centre): the 8x10 screen with the trace in volts, time relative to the trigger point,
   a trigger-level marker and a badge ("Trig'd", "Auto (untriggered)", "Free run"). Mouse wheel and
-  drag zoom/pan; View > Reset zoom (Ctrl+0).
+  drag zoom/pan the time axis; Ctrl+wheel (Cmd on macOS) zooms the vertical axis around the
+  pointer (display only: V/div and position are unchanged; limits 0.5 div up to the full 8-div
+  screen; the header shows "Y zoom xN"); Shift+wheel pans it. Changing V/div or position resets
+  the vertical zoom. View > Reset zoom (Ctrl+0) resets both axes. In the spectrum panel the wheel
+  zooms frequency, Ctrl+wheel zooms dB (turns off Auto Y) and a double-click resets the view.
 - **Vertical (CH1)**: V/div (0.1 to 5), coupling AC/DC/GND, position (the ground marker, +-4 div).
 - **Horizontal**: timebase 500 ms to 10 us per div. 50/20/10 us use equivalent-time sampling:
   they need a repetitive, triggered signal.

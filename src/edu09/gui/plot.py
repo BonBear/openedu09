@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from edu09 import analysis, units
 from edu09.gui.fmt import format_si, timebase_text, vdiv_text
+from edu09.gui.zoomview import WheelViewBox
 from edu09.model import SCREEN_DIVISIONS, Settings, Timebase, TriggerMode, Waveform
 
 __all__ = [
@@ -45,6 +46,9 @@ __all__ = [
 ]
 
 FRAME_SAMPLES = 1024
+#: vertical zoom limits (display only): the whole 8-div screen window down to this many divisions
+MIN_VISIBLE_DIVISIONS = 0.5
+_ZOOM_EPS = 1e-9
 PANEL_MEASUREMENTS: tuple[str, ...] = ("vpp", "frequency", "period", "duty", "mean", "vrms")
 _LABELS = {
     "vpp": "Vpp",
@@ -156,7 +160,8 @@ class ScopePlot(QWidget):
         self._waveform: Waveform | None = None
         self.redraws = 0
 
-        self.widget: Any = pg.PlotWidget(background=theme["background"])
+        self.view_box = WheelViewBox(pan_y=True)
+        self.widget: Any = pg.PlotWidget(background=theme["background"], viewBox=self.view_box)
         self.item: Any = self.widget.getPlotItem()
         self.item.showGrid(x=True, y=True, alpha=0.3)
         self.item.setMenuEnabled(False)
@@ -255,8 +260,11 @@ class ScopePlot(QWidget):
         layout.addLayout(badges)
         layout.addWidget(self.widget, 1)
 
+        self._y_full: tuple[float, float] = (0.0, 1.0)
+        self._graticule_ticks = True
         self.set_settings(self._settings)
         self.reset_cursors()
+        self.view_box.sigYRangeChanged.connect(lambda *_a: self._on_y_range_changed())
 
     # -- settings / view -------------------------------------------------------------------------
     @property
@@ -267,16 +275,23 @@ class ScopePlot(QWidget):
         old = self._settings
         self._settings = s
         lo, hi = s.level_range_v()
-        left = self.item.getAxis("left")
-        left.setTicks([[(v, f"{v:.3g}") for v in y_graticule(s)], []])
-        self.item.setYRange(lo, hi, padding=0)
+        vdiv = float(s.ch1.volts_per_div)
+        self._y_full = (lo, hi)
+        # Y zoom is display-only and limited to the screen window: zoom-out stops at the full
+        # 8 divisions, zoom-in at MIN_VISIBLE_DIVISIONS. A V/div or position change resets it.
+        self.item.setLimits(
+            yMin=lo, yMax=hi, minYRange=MIN_VISIBLE_DIVISIONS * vdiv, maxYRange=hi - lo
+        )
+        if old.level_range_v() != s.level_range_v() or not hasattr(self, "_xrange"):
+            self.item.setYRange(lo, hi, padding=0)
+        self._apply_y_ticks()
         self.level_line.setBounds((lo, hi))
         self.level_line.setValue(s.trigger.level_v)
         self.level_line.setVisible(s.trigger.mode is not TriggerMode.NONE)
         tb = s.timebase
         self.item.getAxis("bottom").setTickSpacing(levels=[(5 * tb.seconds, 0), (tb.seconds, 0)])
         if old.timebase is not s.timebase or not hasattr(self, "_xrange"):
-            self.reset_view()
+            self._reset_x()
         for line in self.v_cursors:
             if not lo <= line.value() <= hi:
                 self.reset_cursors(time=False)
@@ -284,6 +299,41 @@ class ScopePlot(QWidget):
         self._update_info()
 
     def reset_view(self) -> None:
+        """Show the default time window and the full 8-division screen (both axes)."""
+        self.reset_y_zoom()
+        self._reset_x()
+
+    def reset_y_zoom(self) -> None:
+        lo, hi = self._y_full
+        self.item.setYRange(lo, hi, padding=0)
+
+    @property
+    def y_zoom(self) -> float:
+        """Vertical display zoom factor (1 = the full 8-division screen)."""
+        lo, hi = self._y_full
+        r = self.item.viewRange()[1]
+        span = float(r[1] - r[0])
+        return (hi - lo) / span if span > 0 else 1.0
+
+    def y_range(self) -> tuple[float, float]:
+        r = self.item.viewRange()[1]
+        return float(r[0]), float(r[1])
+
+    def _on_y_range_changed(self) -> None:
+        self._apply_y_ticks()
+        self._update_info()
+
+    def _apply_y_ticks(self) -> None:
+        """Graticule labels while unzoomed, pyqtgraph's automatic ticks (in volts) when zoomed."""
+        graticule = self.y_zoom < 1 + _ZOOM_EPS
+        if graticule:
+            ticks = [[(v, f"{v:.3g}") for v in y_graticule(self._settings)], []]
+            self.item.getAxis("left").setTicks(ticks)
+        elif self._graticule_ticks:
+            self.item.getAxis("left").setTicks(None)
+        self._graticule_ticks = graticule
+
+    def _reset_x(self) -> None:
         """Show the default time window for the current timebase."""
         tb = self._settings.timebase
         wf = self._waveform
@@ -361,7 +411,7 @@ class ScopePlot(QWidget):
             self.trigger_badge.setText("Auto (untriggered)")
         tb_changed = prev is None or prev.settings.timebase is not wf.settings.timebase
         if tb_changed and wf.settings.timebase is self._settings.timebase:
-            self.reset_view()
+            self._reset_x()
         self._update_info()
 
     def clear(self) -> None:
@@ -377,6 +427,8 @@ class ScopePlot(QWidget):
             f"CH1 {vdiv_text(float(s.ch1.volts_per_div))} {s.ch1.coupling.value.upper()}",
             timebase_text(s.timebase.seconds),
         ]
+        if self.y_zoom >= 1 + _ZOOM_EPS:
+            parts.append(f"Y zoom \u00d7{self.y_zoom:.3g}")
         wf = self._waveform
         if wf is not None:
             parts.append(f"{format_si(wf.sample_rate_hz, 'S/s', 4)}")

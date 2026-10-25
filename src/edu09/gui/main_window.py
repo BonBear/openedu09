@@ -307,6 +307,7 @@ class MainWindow(QMainWindow):
         self.spectrum_action.setShortcut(QKeySequence("Ctrl+F"))
         self.spectrum_action.setToolTip("FFT spectrum of the displayed frame (below the plot)")
         reset_action = QAction("&Reset zoom", self)
+        reset_action.setToolTip("Reset the time window and the vertical zoom (Ctrl+wheel zooms Y)")
         reset_action.setShortcut(QKeySequence("Ctrl+0"))
         reset_action.triggered.connect(self.plot.reset_view)
         view.addAction(self.cursors_action)

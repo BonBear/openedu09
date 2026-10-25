@@ -5,6 +5,8 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 ## [0.1.0] - unreleased
 
 ### Added
+- GUI: Ctrl+wheel vertical zoom (and Shift+wheel pan) on the time plot, Ctrl+wheel dB zoom and
+  double-click reset on the spectrum; display-only, reset by V/div/position changes and Ctrl+0.
 - Protocol documentation from reverse engineering, verified on hardware (firmware 1.01).
 - Driver: HID transport (hidraw on Linux, hidapi), protocol encoding/decoding, `Scope` with
   acquisition worker, single-process device ownership via a file lock.
