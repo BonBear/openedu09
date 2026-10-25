@@ -678,3 +678,19 @@ averaged; the offset/ground calibration of 11.2 checked accurate within ~1 count
     (* extrapolated or assumed.) Files with any of the v2-only keys are written as `"version": 2`; offset-
     and `range_gain`-only files stay version 1 (readable by older builds). The calibration wizard
     (`edu09-calibrate`, docs/specs/calibration_wizard.md) measures and fits all of this per unit.
+
+### 11.4 ETS trigger position varies between sessions (2026-10-25)
+
+29. **ETS trigger index is not fixed**: with a 555 square wave (3.87 V supply, ~29.4 kHz, RV1 trimmed) the
+    triggering edge in the de-interleaved ETS frame was consistently at the table index **+4** in all ETS
+    modes (mode 2: 252 vs 248; modes 3/4: 257 vs 253), for both edges, at trigger levels 1.0/1.935/3.0 V, at
+    1 and 2 V/div, with both the worker and the raw probe path. The H1 recordings of 2026-10-24
+    (`tests/fixtures/h1/square_trig_*`, 4.4 V supply, 30 kHz) show 248/253. So the ETS position varies by a
+    few samples between sessions/signals (cause unknown). Realtime timebases could not be checked (~5
+    samples per period at 200 us/div).
+    -> For **triggered ETS frames** the worker (`device.worker.detect_trigger_index`) searches the raw frame
+    within `tables.TRIGGER_INDEX_BY_MODE[mode]` +- `ETS_TRIGGER_SEARCH` (8) samples for the first sample past
+    the trigger level (the count of `units.trigger_byte`, edge direction flipped for an inverted ADC) on the
+    configured edge, picks the crossing closest to the table index and sets `Waveform.trigger_index` to it;
+    with no crossing (or GND coupling) the table value is kept. Realtime frames always carry the table
+    value. The simulator models the shift with `SimulatedDevice(ets_trigger_offset=...)`.

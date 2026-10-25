@@ -20,6 +20,7 @@ from hw_helpers import (
 
 from edu09 import analysis, units
 from edu09.device.scope import Scope
+from edu09.device.worker import ETS_TRIGGER_SEARCH
 from edu09.errors import AcquisitionTimeout
 from edu09.model import Timebase
 
@@ -52,7 +53,7 @@ def test_normal_trigger_edge_position(
     scope: Scope, signal: SignalSpec, tb: Timebase, edge: str
 ) -> None:
     _setup(scope, signal, tb, edge)
-    expected = units.trigger_index(tb)
+    table = units.trigger_index(tb)
     # With few samples per period an edge lies within +-2 of ANY index, so the position check
     # would pass even for an untriggered frame: only check it with >= 2 * 5 + 1 samples/period.
     per_period = 1.0 / (signal.frequency_hz * units.sample_interval(tb))
@@ -62,9 +63,20 @@ def test_normal_trigger_edge_position(
         assert wf.triggered
         if per_period < EDGE_CHECK_MIN_SAMPLES_PER_PERIOD:
             continue
+        # ETS: the worker detects the edge per frame (the position varies by a few samples
+        # between sessions, protocol.md 11.4); realtime frames carry the table index.
+        if tb.is_ets:
+            assert wf.trigger_index is not None
+            assert abs(wf.trigger_index - table) <= ETS_TRIGGER_SEARCH, (
+                f"detected {wf.trigger_index}, table {table}"
+            )
+            expected, tol = wf.trigger_index, 1
+        else:
+            assert wf.trigger_index == table
+            expected, tol = table, 2
         got = crossing_near(wf.volts, signal.mid_v, edge == "rising", expected)
         assert got is not None, "no edge in the frame"
-        assert abs(got - expected) <= 2, f"{edge} edge at {got}, expected {expected} +-2"
+        assert abs(got - expected) <= tol, f"{edge} edge at {got}, expected {expected} +-{tol}"
 
 
 @pytest.mark.parametrize("tb", TIMEBASES, ids=lambda t: t.label)

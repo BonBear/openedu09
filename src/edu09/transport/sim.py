@@ -31,7 +31,8 @@ Hardware-verified behaviour (H1, 2026-10-24, firmware 1.01; protocol.md "Hardwar
   that are not part of the frame (the simulator fills them with current input samples).
 * Q4 trigger position (HW-verified per mode): the trigger crossing (first sample past the level)
   is placed at ``tables.TRIGGER_INDEX_BY_MODE[mode]`` in the *time-ordered* frame, unless a fixed
-  ``trigger_index`` is passed.
+  ``trigger_index`` is passed. ``ets_trigger_offset`` (samples, default 0) shifts it in ETS modes
+  only (HW 2026-10-25: the ETS position varies by a few samples between sessions, e.g. +4).
 * ``0x08`` while armed queues one final report (H2: 0.8..8.2 ms later on the HW): the waiting
   report, or ``64 C8 mm`` if the capture had completed (not yet read out); idle: no reply.
 * ``0x0D`` (H2): never live samples. While armed it switches to a fast status stream, one report per
@@ -456,6 +457,7 @@ class SimulatedDevice:
         status_poll: tables.StatusPollStrategy = tables.STATUS_POLL,
         firmware: str = "1.01",
         trigger_index: int | None = None,
+        ets_trigger_offset: int = 0,
         wait_polls: int = 0,
         leading_status_reports: int = tables.READOUT_LEADING_STATUS,
         status_interval_s: float = tables.STATUS_INTERVAL_S,
@@ -477,12 +479,15 @@ class SimulatedDevice:
             raise ValueError("status intervals must be > 0")
         if trigger_index is not None and not 0 <= trigger_index < tables.FRAME_SIZE:
             raise ValueError(f"trigger_index must be in 0..{tables.FRAME_SIZE - 1}")
+        if abs(ets_trigger_offset) > 64:
+            raise ValueError("ets_trigger_offset must be within -64..64 samples")
         self.signal = SignalSpec.parse(signal)
         self.clock = clock
         self.calibration = calibration if calibration is not None else units.Calibration()
         self.status_poll: tables.StatusPollStrategy = status_poll
         self.firmware = firmware
         self.trigger_index = trigger_index
+        self.ets_trigger_offset = ets_trigger_offset
         self.wait_polls = wait_polls
         self.leading_status_reports = leading_status_reports
         self.status_interval_s = status_interval_s
@@ -766,7 +771,8 @@ class SimulatedDevice:
         """Where the trigger crossing lands in the time-ordered frame for acquisition ``mode``."""
         if self.trigger_index is not None:
             return self.trigger_index
-        return tables.TRIGGER_INDEX_BY_MODE[mode]
+        ti = tables.TRIGGER_INDEX_BY_MODE[mode]
+        return ti if mode == tables.MODE_REALTIME else ti + self.ets_trigger_offset
 
     def _find_trigger(self, counts: FloatArray, falling: bool, ti: int) -> int | None:
         """First Schmitt-trigger crossing at index >= ``ti`` that leaves room for a frame."""

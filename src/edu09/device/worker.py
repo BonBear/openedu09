@@ -78,7 +78,7 @@ from edu09.errors import (
     JobAborted,
     ProtocolError,
 )
-from edu09.model import Coupling, Settings, Timebase, TriggerMode, Waveform
+from edu09.model import Coupling, Settings, Timebase, TriggerEdge, TriggerMode, Waveform
 from edu09.protocol import commands, ets, reports, tables
 from edu09.protocol.commands import HwConfig
 from edu09.transport.base import Transport
@@ -93,6 +93,7 @@ __all__ = [
     "StateEvent",
     "WorkerState",
     "decode_frame",
+    "detect_trigger_index",
     "frame_duration_s",
     "public_state",
 ]
@@ -229,6 +230,42 @@ def decode_frame(
         raw[:] = min(max(gnd, tables.ADC_MIN), tables.ADC_MAX)
     volts = units.counts_to_volts(raw, settings.ch1, cal)
     return raw, volts
+
+
+ETS_TRIGGER_SEARCH: Final = 8
+"""Samples either side of the table trigger index searched for the real ETS trigger edge."""
+
+
+def detect_trigger_index(
+    raw: npt.NDArray[np.uint8], settings: Settings, cal: units.Calibration, table_index: int
+) -> int | None:
+    """Index of the first sample past the trigger level on the configured edge, near the table.
+
+    HW (2026-10-25): the ETS trigger position varies by a few samples between sessions/signals
+    (e.g. 252 vs the table 248), so the worker looks for the real crossing per ETS frame. Works in
+    the raw count domain with the count the trigger byte encodes (``units.trigger_byte``), with
+    the edge direction flipped for an inverted ADC. Searches ``table_index +- ETS_TRIGGER_SEARCH``
+    and returns the crossing closest to ``table_index``, or ``None`` when there is none (or the
+    input is GND-coupled, whose samples are synthetic).
+    """
+    if settings.ch1.coupling is Coupling.GND or raw.size < 2:
+        return None
+    b = units.trigger_byte(settings.trigger, settings.ch1, cal)
+    level = float(tables.ADC_MAX - b if tables.TRIGGER_BYTE_INVERTED else b)
+    falling = settings.trigger.edge is TriggerEdge.FALLING
+    falling ^= cal.adc_inverted  # the edge is defined on the input voltage
+    sig = raw.astype(np.float64)
+    if falling:
+        sig, level = -sig, -level
+    lo = max(table_index - ETS_TRIGGER_SEARCH, 1)
+    hi = min(table_index + ETS_TRIGGER_SEARCH, raw.size - 1)
+    if lo > hi:
+        return None
+    idx = np.arange(lo, hi + 1)
+    hits = idx[(sig[idx - 1] < level) & (sig[idx] >= level)]
+    if hits.size == 0:
+        return None
+    return int(hits[np.argmin(np.abs(hits - table_index))])
 
 
 def _set_result(fut: Future[Any], value: Any) -> None:
@@ -1360,6 +1397,12 @@ class AcquisitionWorker:
         self._set_state(WorkerState.READING)
         frame = self._read_frame(expected)
         raw, volts = decode_frame(frame, st.mode, s, self._cal)
+        trig_index = units.trigger_index(s.timebase)
+        if acq.triggered and s.timebase.is_ets:
+            found = detect_trigger_index(raw, s, self._cal, trig_index)
+            log.debug("ETS trigger index: detected %s, table %d", found, trig_index)
+            if found is not None:
+                trig_index = found
         with self._status_lock:
             self._seq += 1
             seq = self._seq
@@ -1369,7 +1412,7 @@ class AcquisitionWorker:
             raw=raw,
             volts=volts,
             dt=units.sample_interval(s.timebase),
-            trigger_index=units.trigger_index(s.timebase),
+            trigger_index=trig_index,
             settings=s,
             calibration_id=self._cal.calibration_id,
             acq_mode=st.mode,

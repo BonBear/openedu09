@@ -252,7 +252,9 @@ class Waveform:
     raw: np.ndarray                # uint8[1024], de-interleaved, read-only (flags.writeable=False)
     volts: np.ndarray              # float64[1024]
     dt: float                      # s/sample (effective rate for ETS)
-    trigger_index: int             # units.trigger_index(tb) = tables.TRIGGER_INDEX_BY_MODE[mode] (HW: 255/248/253/253)
+    trigger_index: int             # units.trigger_index(tb) = tables.TRIGGER_INDEX_BY_MODE[mode] (HW: 255/248/253/253);
+                                   # triggered ETS frames: the edge detected per frame within table +-8
+                                   # (worker.detect_trigger_index, protocol.md 11.4), else the table value
     settings: Settings             # snapshot used for this frame
     calibration_id: str            # hash/source of the Calibration used
     acq_mode: int                  # status mode byte (1 realtime, 2-4 ETS)
@@ -452,7 +454,7 @@ during T7), it files the change request with the orchestrator instead of editing
 | Q1 | **Answered (H1, 2026-10-24; protocol.md 11)**: nothing unsolicited when idle; after `0x0B` the device streams by itself: an all-zero 64-byte waiting report every ~33 ms (`tables.STATUS_INTERVAL_S`) while waiting for a trigger, and `64 C8 mm` + zeros as soon as the capture completes. After `0x0A`: 1-2 leading `64 C8 mm`, then 16 data reports. | `tables.STATUS_POLL = "passive"` (HW-verified; the worker just reads, never re-sends `0x0B`); waiting report = `reports.is_waiting_report` (never a `Status`, R1); simulator default is passive with the HW timing, `resend_arm` kept as a sim option only |
 | Q2 | Meaning of status bytes 1 (not C8) and 3..63. **Resolved (H1/H2)**: byte 1 is only ever `C8`; bytes 3..63 are always zero (also in the `0x0D` stream); waiting has no marker. No live bytes exist anywhere: `0x0D` is a fast status stream, not live samples | `Status.raw` is kept; parse only bytes 0–2; live levels come from free-run frames |
 | Q3 | ADC polarity, GND count at offset 0x80. **Answered (H1)**: higher voltage = higher raw (`ADC_INVERTED=False`), trigger byte not inverted; GND ~132 raw at 0x80 (model 127, left to calibration) | `tables.ADC_INVERTED`, `Calibration.gnd_fit`; all in `units.py` |
-| Q4 | Trigger index. **Answered (H1)**: not 258 but per mode 255 (realtime) / 248 (ETS x8) / 253 (ETS x16) / 253 (10 us), +-1 | `tables.TRIGGER_INDEX_BY_MODE`, `units.trigger_index(tb)`; `Waveform.trigger_index` carried per frame; the simulator places the trigger there |
+| Q4 | Trigger index. **Answered (H1)**: not 258 but per mode 255 (realtime) / 248 (ETS x8) / 253 (ETS x16) / 253 (10 us), +-1 | `tables.TRIGGER_INDEX_BY_MODE`, `units.trigger_index(tb)`; `Waveform.trigger_index` carried per frame (ETS: detected per frame, the position varies +-4 between sessions, protocol.md 11.4); the simulator places the trigger there |
 | Q5 | Edge bit polarity, digital-mode bit. **Answered (H1)** for bit 2: set = falling. Bit 3 untested | `tables.FLAG_*`; digital mode not exposed |
 | Q6/Q7 | Replies to `0x08`/`0x14`/`0x0C`; safety of `0x0A` early or `0x0E` while armed | Opcode classes; `SEND_RELEASE_ON_CLOSE=False`; worker sends `0x0A` only after a valid status; `resync()` drains |
 | Q8 | Version format | Verified: ASCII `1.01` + CR, then garbage; `parse_version` reads up to the CR |

@@ -357,7 +357,9 @@ TRIGGER_INDEX_BY_MODE: Final[dict[int, int]] = {
 """HW-verified (Q4, H1, +-1): index of the first sample past the trigger level on the triggering
 edge in the time-ordered (de-interleaved) 1024-sample frame. Not the help file's 258. Realtime was
 measured at 200 us/div (only ~5 samples per period, hence +-1); ETS 50 us -> 248 (247..248),
-20 us -> 253, 10 us -> 253 (orchestrator's reading: 252)."""
+20 us -> 253, 10 us -> 253 (orchestrator's reading: 252). The ETS positions vary by a few samples
+between sessions (2026-10-25: table +4), so the worker detects the edge per triggered ETS frame
+within +-8 of these values (``device.worker.detect_trigger_index``, protocol.md 11.4)."""
 
 TRIGGER_INDEX: Final = TRIGGER_INDEX_BY_MODE[MODE_REALTIME]
 """Realtime trigger index (255). Use ``TRIGGER_INDEX_BY_MODE`` / ``units.trigger_index(tb)``."""
